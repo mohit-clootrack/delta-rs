@@ -107,6 +107,7 @@ pub(crate) async fn write_execution_plan(
         writer_stats_config,
         None,
         false,
+        None,
     )
     .await
 }
@@ -250,6 +251,7 @@ pub(crate) async fn write_execution_plan_v2(
     writer_stats_config: WriterStatsConfig,
     predicate: Option<Expr>,
     contains_cdc: bool,
+    configuration: Option<std::collections::HashMap<String, Option<String>>>,
 ) -> DeltaResult<Vec<Action>> {
     // We always take the plan Schema since the data may contain Large/View arrow types,
     // the schema and batches were prior constructed with this in mind.
@@ -279,8 +281,12 @@ pub(crate) async fn write_execution_plan_v2(
             let inner_plan = plan.clone();
             let inner_schema = schema.clone();
             let task_ctx = Arc::new(TaskContext::from(&state));
+            
+            // Transform schema for column mapping if needed
+            let writer_schema = apply_column_mapping_to_schema(inner_schema.clone(), snapshot, configuration.as_ref())?;
+            
             let config = WriterConfig::new(
-                inner_schema.clone(),
+                writer_schema,
                 partition_columns.clone(),
                 writer_properties.clone(),
                 target_file_size,
@@ -291,13 +297,19 @@ pub(crate) async fn write_execution_plan_v2(
             let mut writer = DeltaWriter::new(object_store.clone(), config);
             let checker_stream = checker.clone();
             let mut stream = inner_plan.execute(i, task_ctx)?;
+            let snapshot_clone = snapshot.cloned();
+            let configuration_clone = configuration.clone();
 
             let handle: tokio::task::JoinHandle<DeltaResult<Vec<Action>>> =
                 tokio::task::spawn(async move {
                     while let Some(maybe_batch) = stream.next().await {
                         let batch = maybe_batch?;
-                        checker_stream.check_batch(&batch).await?;
-                        writer.write(&batch).await?;
+                        
+                        // Apply column mapping transformation if needed
+                        let mapped_batch = apply_column_mapping_to_batch(batch, snapshot_clone.as_ref(), configuration_clone.as_ref())?;
+                        
+                        checker_stream.check_batch(&mapped_batch).await?;
+                        writer.write(&mapped_batch).await?;
                     }
                     let add_actions = writer.close().await;
                     match add_actions {
@@ -329,8 +341,13 @@ pub(crate) async fn write_execution_plan_v2(
             ));
             let cdf_schema = schema.clone();
             let task_ctx = Arc::new(TaskContext::from(&state));
+            
+            // Transform schemas for column mapping if needed
+            let writer_schema = apply_column_mapping_to_schema(write_schema, snapshot, configuration.as_ref())?;
+            let cdf_writer_schema = apply_column_mapping_to_schema(cdf_schema.clone(), snapshot, configuration.as_ref())?;
+            
             let normal_config = WriterConfig::new(
-                write_schema.clone(),
+                writer_schema,
                 partition_columns.clone(),
                 writer_properties.clone(),
                 target_file_size,
@@ -340,7 +357,7 @@ pub(crate) async fn write_execution_plan_v2(
             );
 
             let cdf_config = WriterConfig::new(
-                cdf_schema.clone(),
+                cdf_writer_schema,
                 partition_columns.clone(),
                 writer_properties.clone(),
                 target_file_size,
@@ -355,6 +372,8 @@ pub(crate) async fn write_execution_plan_v2(
 
             let checker_stream = checker.clone();
             let mut stream = inner_plan.execute(i, task_ctx)?;
+            let snapshot_clone = snapshot.cloned();
+            let configuration_clone = configuration.clone();
 
             let session_context = SessionContext::new();
 
@@ -363,10 +382,13 @@ pub(crate) async fn write_execution_plan_v2(
                     while let Some(maybe_batch) = stream.next().await {
                         let batch = maybe_batch?;
 
+                        // Apply column mapping transformation if needed (before using the batch)
+                        let mapped_batch = apply_column_mapping_to_batch(batch, snapshot_clone.as_ref(), configuration_clone.as_ref())?;
+                        
                         // split batch since we unioned upstream the operation write and cdf plan
                         let table_provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(
-                            batch.schema(),
-                            vec![vec![batch.clone()]],
+                            mapped_batch.schema(),
+                            vec![vec![mapped_batch.clone()]],
                         )?);
                         let batch_df = session_context.read_table(table_provider).unwrap();
 
@@ -450,4 +472,192 @@ pub(crate) async fn write_execution_plan_v2(
         .collect::<Vec<_>>();
     // Collect add actions to add to commit
     Ok(actions)
+}
+
+/// Transform a schema to use physical column names when column mapping is enabled
+fn apply_column_mapping_to_schema(
+    schema: ArrowSchemaRef,
+    snapshot: Option<&DeltaTableState>,
+    configuration: Option<&std::collections::HashMap<String, Option<String>>>,
+) -> DeltaResult<ArrowSchemaRef> {
+    use std::collections::HashMap;
+    use arrow_schema::{Schema, Field};
+    use crate::kernel::MetadataValue;
+    
+    // Check if column mapping is enabled in the configuration
+    let column_mapping_mode = if let Some(config) = configuration {
+        config
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map(|v| v.as_str())
+            .unwrap_or("none")
+    } else if let Some(snapshot) = snapshot {
+        snapshot.metadata().configuration
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map(|v| v.as_str())
+            .unwrap_or("none")
+    } else {
+        "none"
+    };
+            
+    if column_mapping_mode == "name" {
+        // Generate column mapping on-the-fly since snapshot may not have the metadata yet
+        let mut logical_to_physical = HashMap::new();
+        let mut column_id = 1i64;
+        
+        // First, try to get existing mappings from snapshot if available
+        if let Some(snapshot) = snapshot {
+            for field in snapshot.schema().fields() {
+                let logical_name = field.name();
+                
+                // Get physical name from metadata if it exists
+                if let Some(MetadataValue::String(physical_name)) = 
+                    field.metadata().get("delta.columnMapping.physicalName") {
+                    logical_to_physical.insert(logical_name.clone(), physical_name.clone());
+                    
+                    // Update column_id to be higher than existing ones
+                    if let Some(MetadataValue::Number(id)) = field.metadata().get("delta.columnMapping.id") {
+                        column_id = column_id.max(*id as i64 + 1);
+                    }
+                }
+            }
+        }
+        
+        // Generate mappings for any columns that don't have them yet
+        for field in schema.fields() {
+            let logical_name = field.name();
+            if !logical_to_physical.contains_key(logical_name) {
+                let physical_name = format!("col-{}", column_id);
+                logical_to_physical.insert(logical_name.clone(), physical_name.clone());
+                column_id += 1;
+            }
+        }
+        
+        // Create new schema with physical names
+        let mut physical_fields = Vec::new();
+        for field in schema.fields() {
+            let logical_name = field.name();
+            let physical_name = logical_to_physical.get(logical_name)
+                .cloned()
+                .unwrap_or_else(|| logical_name.clone());
+                
+            let physical_field = Field::new(
+                physical_name,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ).with_metadata(field.metadata().clone());
+            
+            physical_fields.push(physical_field);
+        }
+        
+        let physical_schema = Arc::new(Schema::new(physical_fields));
+        return Ok(physical_schema);
+    }
+    
+    // No column mapping, return original schema
+    Ok(schema)
+}
+
+/// Transform a RecordBatch to use physical column names when column mapping is enabled
+fn apply_column_mapping_to_batch(
+    batch: arrow::record_batch::RecordBatch,
+    snapshot: Option<&DeltaTableState>,
+    configuration: Option<&std::collections::HashMap<String, Option<String>>>,
+) -> DeltaResult<arrow::record_batch::RecordBatch> {
+    use std::collections::HashMap;
+    use arrow_schema::{Schema, Field};
+    use crate::kernel::MetadataValue;
+    
+    debug!("🔍 apply_column_mapping_to_batch called with batch schema: {:?}", batch.schema());
+    
+    // Check if column mapping is enabled in the configuration
+    let column_mapping_mode = if let Some(config) = configuration {
+        config
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map(|v| v.as_str())
+            .unwrap_or("none")
+    } else if let Some(snapshot) = snapshot {
+        debug!("🔍 Snapshot available, checking column mapping mode");
+        snapshot.metadata().configuration
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map(|v| v.as_str())
+            .unwrap_or("none")
+    } else {
+        debug!("🔍 No snapshot or configuration available");
+        "none"
+    };
+            
+    debug!("🔍 Column mapping mode: {}", column_mapping_mode);
+            
+    if column_mapping_mode == "name" {
+        debug!("🔍 Column mapping enabled, transforming batch");
+        
+        // Generate column mapping on-the-fly since snapshot may not have the metadata yet
+        let mut logical_to_physical = HashMap::new();
+        let mut column_id = 1i64;
+        
+        // First, try to get existing mappings from snapshot if available
+        if let Some(snapshot) = snapshot {
+            for field in snapshot.schema().fields() {
+                let logical_name = field.name();
+                
+                // Get physical name from metadata if it exists
+                if let Some(MetadataValue::String(physical_name)) = 
+                    field.metadata().get("delta.columnMapping.physicalName") {
+                    logical_to_physical.insert(logical_name.clone(), physical_name.clone());
+                    debug!("🔍 Found existing mapping: {} -> {}", logical_name, physical_name);
+                    
+                    // Update column_id to be higher than existing ones
+                    if let Some(MetadataValue::Number(id)) = field.metadata().get("delta.columnMapping.id") {
+                        column_id = column_id.max(*id as i64 + 1);
+                    }
+                }
+            }
+        }
+        
+        // Generate mappings for any columns that don't have them yet
+        for field in batch.schema().fields() {
+            let logical_name = field.name();
+            if !logical_to_physical.contains_key(logical_name) {
+                let physical_name = format!("col-{}", column_id);
+                logical_to_physical.insert(logical_name.clone(), physical_name.clone());
+                debug!("🔍 Generated new mapping: {} -> {}", logical_name, physical_name);
+                column_id += 1;
+            }
+        }
+        
+        // Create new schema with physical names
+        let mut physical_fields = Vec::new();
+        for field in batch.schema().fields() {
+            let logical_name = field.name();
+            let physical_name = logical_to_physical.get(logical_name)
+                .cloned()
+                .unwrap_or_else(|| logical_name.clone());
+                
+            debug!("🔍 Transforming field: {} -> {}", logical_name, physical_name);
+                
+            let physical_field = Field::new(
+                physical_name,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ).with_metadata(field.metadata().clone());
+            
+            physical_fields.push(physical_field);
+        }
+        
+        let physical_schema = Arc::new(Schema::new(physical_fields));
+        debug!("🔍 New physical schema: {:?}", physical_schema);
+        
+        // Create new batch with physical schema
+        let new_batch = arrow::record_batch::RecordBatch::try_new(physical_schema, batch.columns().to_vec())?;
+        debug!("🔍 Created new batch with physical schema");
+        return Ok(new_batch);
+    }
+    
+    debug!("🔍 No column mapping, returning original batch");
+    // No column mapping, return original batch
+    Ok(batch)
 }

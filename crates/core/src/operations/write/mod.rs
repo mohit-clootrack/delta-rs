@@ -938,6 +938,7 @@ impl std::future::IntoFuture for WriteBuilder {
                 writer_stats_config.clone(),
                 predicate.clone(),
                 contains_cdc,
+                Some(this.configuration.clone()),
             )
             .await?;
 

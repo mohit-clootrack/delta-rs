@@ -885,18 +885,38 @@ class DeltaTable:
         column_mapping_mode = metadata.configuration.get("delta.columnMapping.mode")
         
         if column_mapping_mode == "name":
-            # Column mapping is enabled - create a mapping from logical to physical names
+            # Column mapping is enabled - get the mapping from Delta schema metadata
             logical_to_physical = {}
             physical_to_logical = {}
             
-            for field in schema:
-                if field.metadata and b'delta.columnMapping.physicalName' in field.metadata:
-                    physical_name = field.metadata[b'delta.columnMapping.physicalName'].decode('utf-8')
-                    logical_to_physical[field.name] = physical_name
-                    physical_to_logical[physical_name] = field.name
-                else:
-                    logical_to_physical[field.name] = field.name
-                    physical_to_logical[field.name] = field.name
+            # Get the Delta schema which contains the column mapping metadata
+            delta_schema = self.schema()
+            
+            for field_name in schema.names:
+                # Get the corresponding Delta field for this logical name
+                try:
+                    delta_field = next(f for f in delta_schema.fields if f.name == field_name)
+                    
+                    # Check if the Delta field has physical name metadata
+                    if hasattr(delta_field, 'metadata') and delta_field.metadata:
+                        physical_name_key = 'delta.columnMapping.physicalName'
+                        if physical_name_key in delta_field.metadata:
+                            physical_name = delta_field.metadata[physical_name_key]
+                            logical_to_physical[field_name] = physical_name
+                            physical_to_logical[physical_name] = field_name
+                        else:
+                            # No physical name metadata, use logical name
+                            logical_to_physical[field_name] = field_name
+                            physical_to_logical[field_name] = field_name
+                    else:
+                        # No metadata, use logical name
+                        logical_to_physical[field_name] = field_name
+                        physical_to_logical[field_name] = field_name
+                        
+                except StopIteration:
+                    # Field not found in Delta schema, use logical name
+                    logical_to_physical[field_name] = field_name
+                    physical_to_logical[field_name] = field_name
             
             # Create a physical schema with physical names
             physical_fields = []
