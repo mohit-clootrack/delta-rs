@@ -13,6 +13,11 @@ from typing import (
     Literal,
     NamedTuple,
     Union,
+    Optional,
+    List,
+    Tuple,
+    Dict,
+    Iterator,
 )
 
 from arro3.core import RecordBatch, RecordBatchReader
@@ -28,6 +33,7 @@ from deltalake._internal import (
     PyMergeBuilder,
     RawDeltaTable,
     TableFeatures,
+    ColumnMappingMode,
 )
 from deltalake._internal import create_deltalake as _create_deltalake
 from deltalake._util import encode_partition_value
@@ -45,6 +51,9 @@ if TYPE_CHECKING:
     from pyarrow.dataset import (
         Expression,
         ParquetReadOptions,
+        FileSystemDataset,
+        ParquetFileFormat,
+        ParquetFragmentScanOptions,
     )
 
     from deltalake.transaction import (
@@ -60,8 +69,8 @@ NOT_SUPPORTED_PYARROW_WRITER_VERSIONS = [3, 4, 5, 6]
 SUPPORTED_WRITER_FEATURES = {"appendOnly", "invariants", "timestampNtz"}
 
 MAX_SUPPORTED_READER_VERSION = 3
-NOT_SUPPORTED_READER_VERSION = 2
-SUPPORTED_READER_FEATURES = {"timestampNtz"}
+NOT_SUPPORTED_READER_VERSION = None  # Allow version 2 for column mapping
+SUPPORTED_READER_FEATURES = {"timestampNtz", "columnMapping"}
 
 FSCK_METRICS_FILES_REMOVED_LABEL = "files_removed"
 
@@ -871,6 +880,37 @@ class DeltaTable:
                 self.schema().to_arrow(as_large_types=as_large_types)
             )
 
+        # Check if column mapping is enabled and handle it
+        metadata = self.metadata()
+        column_mapping_mode = metadata.configuration.get("delta.columnMapping.mode")
+        
+        if column_mapping_mode == "name":
+            # Column mapping is enabled - create a mapping from logical to physical names
+            logical_to_physical = {}
+            physical_to_logical = {}
+            
+            for field in schema:
+                if field.metadata and b'delta.columnMapping.physicalName' in field.metadata:
+                    physical_name = field.metadata[b'delta.columnMapping.physicalName'].decode('utf-8')
+                    logical_to_physical[field.name] = physical_name
+                    physical_to_logical[physical_name] = field.name
+                else:
+                    logical_to_physical[field.name] = field.name
+                    physical_to_logical[field.name] = field.name
+            
+            # Create a physical schema with physical names
+            physical_fields = []
+            for field in schema:
+                physical_name = logical_to_physical[field.name]
+                physical_field = pyarrow.field(physical_name, field.type, field.nullable)
+                physical_fields.append(physical_field)
+            
+            physical_schema = pyarrow.schema(physical_fields)
+        else:
+            # No column mapping needed
+            physical_schema = schema
+            physical_to_logical = {field.name: field.name for field in schema}
+
         fragments = [
             format.make_fragment(
                 file,
@@ -878,7 +918,7 @@ class DeltaTable:
                 partition_expression=part_expression,
             )
             for file, part_expression in self._table.dataset_partitions(
-                schema, partitions
+                physical_schema, partitions
             )
         ]
 
@@ -891,7 +931,49 @@ class DeltaTable:
                     )
                     schema = schema.set(index, dict_field)
 
-        return FileSystemDataset(fragments, schema, format, filesystem)
+        # Create the dataset with physical schema but return with logical schema
+        dataset = FileSystemDataset(fragments, physical_schema, format, filesystem)
+        
+        if column_mapping_mode == "name":
+            # Create a wrapper that maps column names back to logical names
+            class ColumnMappingDataset:
+                def __init__(self, dataset, physical_to_logical, logical_schema):
+                    self._dataset = dataset
+                    self._physical_to_logical = physical_to_logical
+                    self._logical_schema = logical_schema
+                
+                @property
+                def schema(self):
+                    return self._logical_schema
+                
+                def to_table(self, columns=None, filter=None, **kwargs):
+                    # Read with physical schema
+                    physical_table = self._dataset.to_table(filter=filter, **kwargs)
+                    
+                    # Map column names back to logical names
+                    logical_columns = []
+                    logical_column_names = []
+                    
+                    for i, physical_name in enumerate(physical_table.schema.names):
+                        logical_name = self._physical_to_logical.get(physical_name, physical_name)
+                        logical_columns.append(physical_table.column(i))
+                        logical_column_names.append(logical_name)
+                    
+                    # Create table with logical names
+                    logical_table = pyarrow.table(logical_columns, names=logical_column_names)
+                    
+                    # Apply column selection if requested
+                    if columns is not None:
+                        logical_table = logical_table.select(columns)
+                    
+                    return logical_table
+                
+                def __getattr__(self, name):
+                    return getattr(self._dataset, name)
+            
+            return ColumnMappingDataset(dataset, physical_to_logical, schema)
+        else:
+            return dataset
 
     def to_pyarrow_table(
         self,
@@ -1167,6 +1249,57 @@ class DeltaTable:
             ```
         """
         return self._table.__datafusion_table_provider__()
+
+    def set_column_metadata(
+        self,
+        field_name: str,
+        metadata: Dict[str, str],
+        custom_metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Set metadata for a column in the table.
+
+        Args:
+            field_name: The name of the column to set metadata for.
+            metadata: The metadata to set for the column.
+            custom_metadata: Custom metadata to add to the commit.
+        """
+        self._table.set_column_metadata(field_name, metadata, custom_metadata)
+
+    def column_mapping(
+        self,
+        mode: Optional[ColumnMappingMode] = None,
+        rename_columns: Optional[List[Tuple[str, str]]] = None,
+        drop_columns: Optional[List[str]] = None,
+        custom_metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Configure column mapping for the table.
+
+        Args:
+            mode: The column mapping mode to enable (None, Name, or Id).
+            rename_columns: List of (old_name, new_name) tuples for renaming columns.
+            drop_columns: List of column names to drop.
+            custom_metadata: Custom metadata to add to the commit.
+
+        Example:
+            Enable column mapping and rename a column:
+            ```python
+            from deltalake import DeltaTable, ColumnMappingMode
+            
+            dt = DeltaTable("path/to/table")
+            
+            # Enable column mapping
+            dt.column_mapping(mode=ColumnMappingMode.Name)
+            
+            # Rename a column
+            dt.column_mapping(rename_columns=[("old_name", "new_name")])
+            
+            # Drop a column
+            dt.column_mapping(drop_columns=["column_to_drop"])
+            ```
+        """
+        self._table.column_mapping(mode, rename_columns, drop_columns, custom_metadata)
 
 
 class TableMerger:

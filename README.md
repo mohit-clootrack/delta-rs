@@ -201,3 +201,95 @@ of features outlined in the Delta [protocol][protocol] is also [tracked](#protoc
 [check-constraints]: https://github.com/delta-io/delta-rs/issues/1881
 [onelake-rs]: https://github.com/delta-io/delta-rs/issues/1418
 [protocol]: https://github.com/delta-io/delta/blob/master/PROTOCOL.md
+
+# Delta Column Mapping Implementation
+
+This branch implements column mapping support for the Delta Lake format in delta-rs.
+
+## What is Column Mapping?
+
+Column mapping is a feature in Delta Lake that provides a layer of indirection between the logical column names in the schema and the physical column names used in data files. This feature enables schema evolution operations like:
+
+- Renaming columns without rewriting data files
+- Dropping columns without rewriting data files
+- Supporting special characters in column names
+
+Column mapping is essential for schema evolution in Delta tables and makes operations like column renames much more efficient.
+
+## Implementation Details
+
+The implementation includes:
+
+1. **Core Rust Implementation**
+   - New `ColumnMappingBuilder` in `crates/core/src/operations/column_mapping.rs`
+   - Integration with `DeltaOps` in `crates/core/src/operations/mod.rs`
+   - New operation types `ChangeColumn` and `DropColumn` in `crates/core/src/protocol/mod.rs`
+
+2. **Python Bindings**
+   - `ColumnMappingMode` enum exposed to Python
+   - `column_mapping` method added to `DeltaTable` Python class
+   - Support for rename and drop operations
+
+3. **Examples**
+   - Python example in `examples/column_mapping_example.py`
+   - Rust example in `examples/column_mapping_rust_example.rs`
+
+4. **Tests**
+   - Unit tests in `crates/core/tests/column_mapping_test.rs`
+
+## Usage Examples
+
+### Rust
+
+```rust
+// Enable column mapping
+let table = DeltaOps::from(table)
+    .column_mapping()
+    .with_mode(ColumnMappingMode::Name)
+    .await?;
+
+// Rename a column
+let table = DeltaOps::from(table)
+    .column_mapping()
+    .with_rename_column("old_name".to_string(), "new_name".to_string())
+    .await?;
+
+// Drop a column
+let table = DeltaOps::from(table)
+    .column_mapping()
+    .with_drop_column("column_to_drop".to_string())
+    .await?;
+```
+
+### Python
+
+```python
+from deltalake import DeltaTable, ColumnMappingMode
+
+# Enable column mapping
+dt = DeltaTable("path/to/table")
+dt.column_mapping(mode=ColumnMappingMode.Name)
+
+# Rename a column
+dt.column_mapping(rename_columns=[("old_name", "new_name")])
+
+# Drop a column
+dt.column_mapping(drop_columns=["column_to_drop"])
+```
+
+## Requirements
+
+Column mapping requires:
+- Reader version >= 2
+- Writer version >= 5
+
+The implementation automatically verifies these requirements and raises appropriate errors if they're not met.
+
+## Notes
+
+- Column mapping is an essential part of the Delta Lake protocol for schema evolution
+- This implementation supports both `Name` and `Id` mapping modes
+- When column mapping is enabled, each column gets assigned:
+  - A unique ID (`delta.columnMapping.id`)
+  - A physical name (`delta.columnMapping.physicalName`)
+- The table also tracks the maximum column ID used (`delta.columnMapping.maxColumnId`)

@@ -3,6 +3,7 @@ from deltalake._internal import (
     Transaction,
     __version__,
     rust_core_version,
+    ColumnMappingMode,
 )
 from deltalake.query import QueryBuilder
 from deltalake.schema import DataType, Field, Schema
@@ -34,4 +35,5 @@ __all__ = [
     "convert_to_deltalake",
     "rust_core_version",
     "write_deltalake",
+    "ColumnMappingMode",
 ]

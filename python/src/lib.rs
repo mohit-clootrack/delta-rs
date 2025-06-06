@@ -32,6 +32,7 @@ use deltalake::logstore::LogStoreRef;
 use deltalake::logstore::{IORuntime, ObjectStoreRef};
 use deltalake::operations::add_column::AddColumnBuilder;
 use deltalake::operations::add_feature::AddTableFeatureBuilder;
+use deltalake::operations::column_mapping::ColumnMappingBuilder;
 use deltalake::operations::constraints::ConstraintBuilder;
 use deltalake::operations::convert_to_delta::{ConvertToDeltaBuilder, PartitionStrategy};
 use deltalake::operations::delete::DeleteBuilder;
@@ -97,6 +98,24 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 enum PartitionFilterValue {
     Single(PyBackedStr),
     Multiple(Vec<PyBackedStr>),
+}
+
+#[pyclass(eq, module = "deltalake._internal")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnMappingMode {
+    None,
+    Name,
+    Id,
+}
+
+impl From<ColumnMappingMode> for delta_kernel::table_features::ColumnMappingMode {
+    fn from(mode: ColumnMappingMode) -> Self {
+        match mode {
+            ColumnMappingMode::None => delta_kernel::table_features::ColumnMappingMode::None,
+            ColumnMappingMode::Name => delta_kernel::table_features::ColumnMappingMode::Name,
+            ColumnMappingMode::Id => delta_kernel::table_features::ColumnMappingMode::Id,
+        }
+    }
 }
 
 #[pyclass(module = "deltalake._internal")]
@@ -439,13 +458,32 @@ impl RawDeltaTable {
 
     #[getter]
     pub fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let schema: StructType = self.with_table(|t| {
-            t.get_schema()
+        let (schema, metadata) = self.with_table(|t| {
+            let schema = t.get_schema()
                 .map_err(PythonError::from)
-                .map_err(PyErr::from)
-                .map(|s| s.to_owned())
+                .map_err(PyErr::from)?
+                .to_owned();
+            let metadata = t.metadata()
+                .map_err(PythonError::from)
+                .map_err(PyErr::from)?
+                .clone();
+            Ok((schema, metadata))
         })?;
-        schema_to_pyobject(schema, py)
+        
+        // Check if column mapping is enabled
+        let column_mapping_mode = metadata.configuration
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map_or("none", |v| v.as_str());
+            
+        if column_mapping_mode == "name" {
+            // Column mapping is enabled - return the logical schema (schema already contains logical names)
+            // The schema from t.get_schema() already has the logical column names that users expect to see
+            schema_to_pyobject(schema, py)
+        } else {
+            // No column mapping - return schema as before
+            schema_to_pyobject(schema, py)
+        }
     }
 
     /// Run the Vacuum command on the Delta Table: list and delete files no longer referenced
@@ -1041,26 +1079,66 @@ impl RawDeltaTable {
         let stats_cols = self.get_stats_columns()?;
         let num_index_cols = self.get_num_index_cols()?;
 
-        let schema = schema.into_inner();
+        let logical_schema = schema.into_inner();
+
+        // Check if column mapping is enabled
+        let metadata = self.with_table(|t| {
+            t.metadata()
+                .cloned()
+                .map_err(PythonError::from)
+                .map_err(PyErr::from)
+        })?;
+        
+        let column_mapping_mode = metadata.configuration
+            .get("delta.columnMapping.mode")
+            .and_then(|v| v.as_ref())
+            .map_or("none", |v| v.as_str());
+
+        // For statistics expressions, always use the logical schema that Polars expects
+        // The key insight: file statistics should be expressed in terms of logical column names
+        let expression_schema = logical_schema.as_ref().clone();
 
         let inclusion_stats_cols = if let Some(stats_cols) = stats_cols {
             stats_cols
         } else if num_index_cols == -1 {
-            schema
+            expression_schema
                 .fields()
                 .iter()
                 .map(|v| v.name().clone())
                 .collect::<Vec<_>>()
         } else if num_index_cols >= 0 {
             let mut fields = vec![];
-            for idx in 0..(min(num_index_cols as usize, schema.fields.len())) {
-                fields.push(schema.field(idx).name().clone())
+            for idx in 0..(min(num_index_cols as usize, expression_schema.fields.len())) {
+                fields.push(expression_schema.field(idx).name().clone())
             }
             fields
         } else {
             return Err(PythonError::from(DeltaTableError::generic(
                 "Couldn't construct list of fields for file stats expression gatherings",
             )))?;
+        };
+
+        // Create mapping from physical to logical names if column mapping is enabled
+        let physical_to_logical = if column_mapping_mode == "name" {
+            let delta_schema = self.with_table(|t| {
+                t.get_schema()
+                    .cloned()
+                    .map_err(PythonError::from)
+                    .map_err(PyErr::from)
+            })?;
+            
+            let mut mapping = HashMap::new();
+            for delta_field in delta_schema.fields() {
+                let metadata = delta_field.metadata();
+                if let Some(physical_name_value) = metadata.get("delta.columnMapping.physicalName") {
+                    if let MetadataValue::String(physical_name) = physical_name_value {
+                        mapping.insert(physical_name.clone(), delta_field.name().clone());
+                    }
+                }
+            }
+            mapping
+        } else {
+            HashMap::new()
         };
 
         self.cloned_state()?
@@ -1074,8 +1152,20 @@ impl RawDeltaTable {
                 }
             })
             .map(|(path, f)| {
-                let expression =
-                    filestats_to_expression_next(py, &schema, &inclusion_stats_cols, f)?;
+                let expression = if column_mapping_mode == "name" {
+                    // For column mapping enabled tables, we need to convert physical column names
+                    // in file statistics to logical column names
+                    filestats_to_expression_with_mapping(
+                        py, 
+                        &Arc::new(expression_schema.clone()), 
+                        &inclusion_stats_cols, 
+                        f, 
+                        &physical_to_logical
+                    )?
+                } else {
+                    // For normal tables, use the existing function
+                    filestats_to_expression_next(py, &Arc::new(expression_schema.clone()), &inclusion_stats_cols, f)?
+                };
                 Ok((path, expression))
             })
             .collect()
@@ -1746,6 +1836,61 @@ impl RawDeltaTable {
 
         PyCapsule::new(py, provider, Some(name.clone()))
     }
+
+    #[pyo3(signature = (mode = None, rename_columns = None, drop_columns = None, custom_metadata = None))]
+    pub fn column_mapping(
+        &mut self,
+        py: Python,
+        mode: Option<ColumnMappingMode>,
+        rename_columns: Option<Vec<(String, String)>>,
+        drop_columns: Option<Vec<String>>,
+        custom_metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<()> {
+        let table = py.allow_threads(|| -> Result<_, PythonError> {
+            let log_store = self.log_store()
+                .map_err(|e| PythonError::from(DeltaTableError::Generic(e.to_string())))?;
+            
+            let state = self.cloned_state()
+                .map_err(|e| PythonError::from(DeltaTableError::Generic(e.to_string())))?;
+
+            let mut cmd = ColumnMappingBuilder::new(log_store, state);
+
+            if let Some(mode) = mode {
+                cmd = cmd.with_mode(mode.into());
+            }
+
+            if let Some(renames) = rename_columns {
+                for (old_name, new_name) in renames {
+                    cmd = cmd.with_rename_column(old_name, new_name);
+                }
+            }
+
+            if let Some(drops) = drop_columns {
+                for column_name in drops {
+                    cmd = cmd.with_drop_column(column_name);
+                }
+            }
+
+            let mut commit_properties = CommitProperties::default();
+            
+            if let Some(metadata) = custom_metadata {
+                // Convert HashMap<String, String> to Map<String, Value>
+                let json_metadata: Map<String, Value> = 
+                    metadata.into_iter().map(|(k, v)| (k, v.into())).collect();
+                commit_properties = commit_properties.with_metadata(json_metadata);
+            }
+            
+            cmd = cmd.with_commit_properties(commit_properties);
+
+            // Execute the operation
+            rt().block_on(cmd.into_future())
+                .map_err(PythonError::from)
+        }).map_err(PyErr::from)?;
+        
+        // Update the state
+        self.set_state(table.state)?;
+        Ok(())
+    }
 }
 
 fn set_post_commithook_properties(
@@ -1970,6 +2115,151 @@ fn scalar_to_py<'py>(value: &Scalar, py_date: &Bound<'py, PyAny>) -> PyResult<Bo
     };
 
     Ok(val.into_bound(py))
+}
+
+/// Create expression that file statistics guarantee to be true, with column mapping support.
+///
+/// This is similar to filestats_to_expression_next but handles column mapping by translating
+/// physical column names in file statistics to logical column names before creating expressions.
+fn filestats_to_expression_with_mapping<'py>(
+    py: Python<'py>,
+    schema: &SchemaRef,
+    stats_columns: &[String],
+    file_info: LogicalFile<'_>,
+    physical_to_logical: &HashMap<String, String>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let ds = PyModule::import(py, "pyarrow.dataset")?;
+    let py_field = ds.getattr("field")?;
+    let pa = PyModule::import(py, "pyarrow")?;
+    let py_date = Python::import(py, "datetime")?.getattr("date")?;
+    let mut expressions = Vec::new();
+
+    let cast_to_type = |column_name: &String, value: &Bound<'py, PyAny>, schema: &ArrowSchema| {
+        let column_type = schema
+            .field_with_name(column_name)
+            .map_err(|_| {
+                PyValueError::new_err(format!("Column not found in schema: {column_name}"))
+            })?
+            .data_type()
+            .clone();
+        let column_type = PyArrowType(column_type).into_pyobject(py)?;
+        pa.call_method1("scalar", (value,))?
+            .call_method1("cast", (column_type,))
+    };
+
+    // Helper function to map physical column name to logical column name
+    let map_column_name = |physical_name: &str| -> String {
+        physical_to_logical.get(physical_name)
+            .cloned()
+            .unwrap_or_else(|| physical_name.to_string())
+    };
+
+    if let Ok(partitions_values) = file_info.partition_values() {
+        for (column, value) in partitions_values.iter() {
+            let logical_column = map_column_name(column);
+            if !value.is_null() {
+                // value is a string, but needs to be parsed into appropriate type
+                let converted_value =
+                    cast_to_type(&logical_column, &scalar_to_py(value, &py_date)?, schema)?;
+                expressions.push(
+                    py_field
+                        .call1((&logical_column,))?
+                        .call_method1("__eq__", (converted_value,)),
+                );
+            } else {
+                expressions.push(py_field.call1((logical_column,))?.call_method0("is_null"));
+            }
+        }
+    }
+
+    let mut has_nulls_set: HashSet<String> = HashSet::new();
+
+    // NOTE: null_counts should always return a struct scalar.
+    if let Some(Scalar::Struct(data)) = file_info.null_counts() {
+        for (field, value) in data.fields().iter().zip(data.values().iter()) {
+            let logical_field_name = map_column_name(field.name());
+            if stats_columns.contains(&logical_field_name) {
+                if let Scalar::Long(val) = value {
+                    if *val == 0 {
+                        expressions.push(py_field.call1((&logical_field_name,))?.call_method0("is_valid"));
+                    } else if Some(*val as usize) == file_info.num_records() {
+                        expressions.push(py_field.call1((&logical_field_name,))?.call_method0("is_null"));
+                    } else {
+                        has_nulls_set.insert(logical_field_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // NOTE: min_values should always return a struct scalar.
+    if let Some(Scalar::Struct(data)) = file_info.min_values() {
+        for (field, value) in data.fields().iter().zip(data.values().iter()) {
+            let logical_field_name = map_column_name(field.name());
+            if stats_columns.contains(&logical_field_name) {
+                match value {
+                    // TODO: Handle nested field statistics.
+                    Scalar::Struct(_) => {}
+                    _ => {
+                        let maybe_minimum =
+                            cast_to_type(&logical_field_name, &scalar_to_py(value, &py_date)?, schema);
+                        if let Ok(minimum) = maybe_minimum {
+                            let field_expr = py_field.call1((&logical_field_name,))?;
+                            let expr = field_expr.call_method1("__ge__", (minimum,));
+                            let expr = if has_nulls_set.contains(&logical_field_name) {
+                                // col >= min_value OR col is null
+                                let is_null_expr = field_expr.call_method0("is_null");
+                                expr?.call_method1("__or__", (is_null_expr?,))
+                            } else {
+                                // col >= min_value
+                                expr
+                            };
+                            expressions.push(expr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // NOTE: max_values should always return a struct scalar.
+    if let Some(Scalar::Struct(data)) = file_info.max_values() {
+        for (field, value) in data.fields().iter().zip(data.values().iter()) {
+            let logical_field_name = map_column_name(field.name());
+            if stats_columns.contains(&logical_field_name) {
+                match value {
+                    // TODO: Handle nested field statistics.
+                    Scalar::Struct(_) => {}
+                    _ => {
+                        let maybe_maximum =
+                            cast_to_type(&logical_field_name, &scalar_to_py(value, &py_date)?, schema);
+                        if let Ok(maximum) = maybe_maximum {
+                            let field_expr = py_field.call1((&logical_field_name,))?;
+                            let expr = field_expr.call_method1("__le__", (maximum,));
+                            let expr = if has_nulls_set.contains(&logical_field_name) {
+                                // col <= max_value OR col is null
+                                let is_null_expr = field_expr.call_method0("is_null");
+                                expr?.call_method1("__or__", (is_null_expr?,))
+                            } else {
+                                // col <= max_value
+                                expr
+                            };
+                            expressions.push(expr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if expressions.is_empty() {
+        Ok(None)
+    } else {
+        expressions
+            .into_iter()
+            .reduce(|accum, item| accum?.call_method1("__and__", (item?,)))
+            .transpose()
+    }
 }
 
 /// Create expression that file statistics guarantee to be true.
@@ -2562,5 +2852,6 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<filesystem::ObjectInputFile>()?;
     m.add_class::<filesystem::ObjectOutputStream>()?;
     m.add_class::<features::TableFeatures>()?;
+    m.add_class::<ColumnMappingMode>()?;
     Ok(())
 }

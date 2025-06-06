@@ -370,6 +370,18 @@ pub enum DeltaOperation {
         /// The metadata update to apply
         metadata_update: crate::operations::update_table_metadata::TableMetadataUpdate,
     },
+    /// Change column operations (rename)
+    #[serde(rename_all = "camelCase")]
+    ChangeColumn {
+        /// Column changes (old_name, new_name)
+        columns: Vec<(String, String)>,
+    },
+    /// Drop column operations
+    #[serde(rename_all = "camelCase")]
+    DropColumn {
+        /// Columns to drop
+        columns: Vec<String>,
+    },
 }
 
 impl DeltaOperation {
@@ -399,6 +411,8 @@ impl DeltaOperation {
             DeltaOperation::AddFeature { .. } => "ADD FEATURE",
             DeltaOperation::UpdateFieldMetadata { .. } => "UPDATE FIELD METADATA",
             DeltaOperation::UpdateTableMetadata { .. } => "UPDATE TABLE METADATA",
+            DeltaOperation::ChangeColumn { .. } => "CHANGE COLUMN",
+            DeltaOperation::DropColumn { .. } => "DROP COLUMN",
         }
     }
 
@@ -441,7 +455,9 @@ impl DeltaOperation {
             | Self::VacuumStart { .. }
             | Self::VacuumEnd { .. }
             | Self::AddConstraint { .. }
-            | Self::DropConstraint { .. } => false,
+            | Self::DropConstraint { .. }
+            | Self::ChangeColumn { .. }
+            | Self::DropColumn { .. } => false,
             Self::Create { .. }
             | Self::FileSystemCheck {}
             | Self::StreamingUpdate { .. }
@@ -756,7 +772,7 @@ mod tests {
                 "partition_values",
                 Arc::new(array::StructArray::new(
                     Fields::from(vec![Field::new("k", DataType::Utf8, true)]),
-                    vec![Arc::new(array::StringArray::from(vec![Some("A"), None])) as ArrayRef],
+                    vec![Arc::new(array::StringArray::from(vec![Some("A"), None]))],
                     None,
                 )),
             );
@@ -857,12 +873,12 @@ mod tests {
                             Field::new("cardinality", DataType::Int64, false),
                         ]),
                         vec![
-                            Arc::new(array::StringArray::from(vec!["u"])) as ArrayRef,
+                            Arc::new(array::StringArray::from(vec!["u"])),
                             Arc::new(array::StringArray::from(vec!["Q6Kt3y1b)0MgZSWwPunr"]))
                                 as ArrayRef,
-                            Arc::new(array::Int32Array::from(vec![1])) as ArrayRef,
-                            Arc::new(array::Int32Array::from(vec![36])) as ArrayRef,
-                            Arc::new(array::Int64Array::from(vec![2])) as ArrayRef,
+                            Arc::new(array::Int32Array::from(vec![1])),
+                            Arc::new(array::Int32Array::from(vec![36])),
+                            Arc::new(array::Int64Array::from(vec![2])),
                         ],
                         None,
                     )),

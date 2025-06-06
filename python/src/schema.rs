@@ -857,6 +857,21 @@ impl PySchema {
         }
     }
 
+    #[pyo3(signature = (as_large_types = false))]
+    fn to_pyarrow(self_: PyRef<'_, Self>, as_large_types: bool) -> PyResult<Bound<'_, PyAny>> {
+        // Get Python reference first
+        let py = self_.py();
+        
+        // Get the Arro3 Schema first
+        let arro3_schema = Self::to_arrow(self_, as_large_types)?;
+        
+        // Convert to PyArrow Schema using pyarrow.schema()
+        let pyarrow = PyModule::import(py, "pyarrow")?;
+        let pa_schema = pyarrow.getattr("schema")?.call1((arro3_schema,))?;
+        
+        Ok(pa_schema)
+    }
+
     fn __arrow_c_schema__<'py>(
         self_: PyRef<'_, Self>,
         py: Python<'py>,
