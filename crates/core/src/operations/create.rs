@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use delta_kernel::schema::MetadataValue;
+use delta_kernel::table_features::{ReaderFeature, WriterFeature};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use tracing::log::*;
@@ -15,6 +16,7 @@ use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, TableReference, PROTOCOL};
 use crate::kernel::{Action, DataType, Metadata, Protocol, StructField, StructType};
 use crate::logstore::LogStoreRef;
+use crate::operations::write::generated_columns::{add_column_mapping_metadata, get_max_column_id};
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::table::builder::ensure_table_uri;
 use crate::table::config::TableProperty;
@@ -276,7 +278,7 @@ impl CreateBuilder {
         let operation_id = self.get_operation_id();
         self.pre_execute(operation_id).await?;
 
-        let configuration = self.configuration;
+        let mut configuration = self.configuration;
 
         let current_protocol = Protocol {
             min_reader_version: PROTOCOL.default_reader_version(),
@@ -295,9 +297,26 @@ impl CreateBuilder {
             })
             .unwrap_or_else(|| current_protocol);
 
-        let schema = StructType::new(self.columns);
+        let mut schema = StructType::new(self.columns);
 
-        let protocol = protocol
+        // Check if column mapping is being enabled
+        let column_mapping_mode = configuration
+            .get("delta.columnMapping.mode")
+            .and_then(|mode| mode.as_ref())
+            .map(|mode| mode.as_str())
+            .unwrap_or("none")
+            .to_string();
+
+        if column_mapping_mode == "name" {
+            // Add column mapping metadata to schema
+            schema = add_column_mapping_metadata(schema, true)?;
+            
+            // Update configuration with maxColumnId
+            let max_column_id = get_max_column_id(&schema);
+            configuration.insert("delta.columnMapping.maxColumnId".to_string(), Some(max_column_id.to_string()));
+        }
+
+        let mut protocol = protocol
             .apply_properties_to_protocol(
                 &configuration
                     .iter()
@@ -307,6 +326,20 @@ impl CreateBuilder {
             )?
             .apply_column_metadata_to_protocol(&schema)?
             .move_table_properties_into_features(&configuration);
+
+        // Enable column mapping features if needed
+        if column_mapping_mode == "name" {
+            let mut reader_features = protocol.reader_features.unwrap_or_default();
+            reader_features.insert(ReaderFeature::ColumnMapping);
+            
+            let mut writer_features = protocol.writer_features.unwrap_or_default();
+            writer_features.insert(WriterFeature::ColumnMapping);
+            
+            protocol.reader_features = Some(reader_features);
+            protocol.writer_features = Some(writer_features);
+            protocol.min_reader_version = 2;
+            protocol.min_writer_version = 5;
+        }
 
         let mut metadata = Metadata::try_new(
             schema,

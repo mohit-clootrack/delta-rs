@@ -46,6 +46,9 @@ pub enum TableProperty {
     /// Parquet columns that use different names.
     ColumnMappingMode,
 
+    /// The maximum column ID used for column mapping.
+    ColumnMappingMaxColumnId,
+
     /// The number of columns for Delta Lake to collect statistics about for data skipping.
     /// A value of -1 means to collect statistics for all columns. Updating this property does
     /// not automatically collect statistics again; instead, it redefines the statistics schema
@@ -135,6 +138,7 @@ impl AsRef<str> for TableProperty {
             Self::CheckpointUseRunLengthEncoding => "delta-rs.checkpoint.useRunLengthEncoding",
             Self::CheckpointPolicy => "delta.checkpointPolicy",
             Self::ColumnMappingMode => "delta.columnMapping.mode",
+            Self::ColumnMappingMaxColumnId => "delta.columnMapping.maxColumnId",
             Self::DataSkippingNumIndexedCols => "delta.dataSkippingNumIndexedCols",
             Self::DataSkippingStatsColumns => "delta.dataSkippingStatsColumns",
             Self::DeletedFileRetentionDuration => "delta.deletedFileRetentionDuration",
@@ -168,6 +172,7 @@ impl FromStr for TableProperty {
             "delta-rs.checkpoint.useRunLengthEncoding" => Ok(Self::CheckpointUseRunLengthEncoding),
             "delta.checkpointPolicy" => Ok(Self::CheckpointPolicy),
             "delta.columnMapping.mode" => Ok(Self::ColumnMappingMode),
+            "delta.columnMapping.maxColumnId" => Ok(Self::ColumnMappingMaxColumnId),
             "delta.dataSkippingNumIndexedCols" => Ok(Self::DataSkippingNumIndexedCols),
             "delta.dataSkippingStatsColumns" => Ok(Self::DataSkippingStatsColumns),
             "delta.deletedFileRetentionDuration" | "deletedFileRetentionDuration" => {
@@ -411,7 +416,7 @@ pub enum IsolationLevel {
     /// and all reads are Serializable. Operations are allowed as long as there
     /// exists a serial sequence of executing them one-at-a-time that generates
     /// the same outcome as that seen in the table. For the write operations,
-    /// the serial sequence is exactly the same as that seen in the table’s history.
+    /// the serial sequence is exactly the same as that seen in the table's history.
     Serializable,
 
     /// A weaker isolation level than Serializable. It ensures only that the write
