@@ -5,7 +5,7 @@ use datafusion_expr::{col, when, Expr, ExprSchemable};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use tracing::debug;
 
-use crate::{kernel::DataCheck, table::GeneratedColumn, DeltaResult};
+use crate::{kernel::{StructField, StructType, ColumnMetadataKey, DataCheck}, table::GeneratedColumn, DeltaResult};
 
 /// check if the writer version is able to write generated columns
 pub fn able_to_gc(snapshot: &DeltaTableState) -> DeltaResult<bool> {
@@ -80,4 +80,68 @@ pub fn add_generated_columns(
         )?
     }
     Ok(df)
+}
+
+/// Add column mapping metadata to schema fields
+pub fn add_column_mapping_metadata(schema: StructType, is_first_time: bool) -> DeltaResult<StructType> {
+    let mut max_column_id = if is_first_time { 1i64 } else {
+        get_max_column_id(&schema) + 1
+    };
+    let mut new_fields = Vec::new();
+
+    for field in schema.fields() {
+        let mut metadata = field.metadata().clone();
+        
+        // Only add metadata if it doesn't already exist
+        if !metadata.contains_key(ColumnMetadataKey::ColumnMappingId.as_ref()) {
+            metadata.insert(
+                ColumnMetadataKey::ColumnMappingId.as_ref().to_string(),
+                max_column_id.into(),
+            );
+            max_column_id += 1;
+        }
+
+        if !metadata.contains_key(ColumnMetadataKey::ColumnMappingPhysicalName.as_ref()) {
+            let column_id = metadata.get(ColumnMetadataKey::ColumnMappingId.as_ref())
+                .and_then(|v| match v {
+                    crate::kernel::MetadataValue::Number(n) => Some(*n as i64),
+                    _ => None,
+                })
+                .unwrap_or(max_column_id - 1);
+            metadata.insert(
+                ColumnMetadataKey::ColumnMappingPhysicalName.as_ref().to_string(),
+                format!("col-{}", column_id).into(),
+            );
+        }
+
+        let new_field = StructField::new(
+            field.name().clone(),
+            field.data_type().clone(),
+            field.is_nullable(),
+        ).with_metadata(metadata);
+
+        new_fields.push(new_field);
+    }
+
+    Ok(StructType::new(new_fields))
+}
+
+/// Get the maximum column ID from the schema
+pub fn get_max_column_id(schema: &StructType) -> i64 {
+    let mut max_id = 0i64;
+    
+    for field in schema.fields() {
+        if let Some(column_id) = field.metadata()
+            .get(ColumnMetadataKey::ColumnMappingId.as_ref())
+            .and_then(|v| match v {
+                crate::kernel::MetadataValue::Number(n) => Some(*n as i64),
+                _ => None,
+            })
+        {
+            max_id = max_id.max(column_id);
+        }
+    }
+    
+    // If no existing column IDs found, return 0 (will be incremented to 1)
+    max_id
 }

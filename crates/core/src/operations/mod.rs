@@ -25,6 +25,7 @@ use self::filesystem_check::FileSystemCheckBuilder;
 #[cfg(feature = "datafusion")]
 use self::optimize::OptimizeBuilder;
 use self::restore::RestoreBuilder;
+use self::schema_evolution::SchemaEvolutionBuilder;
 use self::set_tbl_properties::SetTablePropertiesBuilder;
 use self::update_table_metadata::UpdateTableMetadataBuilder;
 use self::vacuum::VacuumBuilder;
@@ -48,6 +49,7 @@ pub mod create;
 pub mod drop_constraints;
 pub mod filesystem_check;
 pub mod restore;
+pub mod schema_evolution;
 pub mod update_field_metadata;
 pub mod update_table_metadata;
 pub mod vacuum;
@@ -316,6 +318,32 @@ impl DeltaOps {
     /// Configure column mapping for the table
     pub fn column_mapping(self) -> ColumnMappingBuilder {
         ColumnMappingBuilder::new(self.0.log_store, self.0.state.unwrap())
+    }
+
+    /// Perform comprehensive schema evolution operations
+    pub fn schema_evolution(self) -> SchemaEvolutionBuilder {
+        SchemaEvolutionBuilder::new(self.0.log_store.clone(), self.0.state.unwrap())
+    }
+
+    /// Enable enhanced write operations with automatic schema evolution
+    #[cfg(feature = "datafusion")]
+    pub fn write_with_schema_evolution(
+        self,
+        batches: impl IntoIterator<Item = RecordBatch>,
+    ) -> crate::operations::schema_evolution::SchemaAwareWriteBuilder {
+        let write_builder = self.write(batches);
+        crate::operations::schema_evolution::SchemaAwareWriteBuilder::new(write_builder)
+    }
+
+    /// Enable enhanced merge operations with automatic schema evolution
+    #[cfg(feature = "datafusion")]
+    pub fn merge_with_schema_evolution<E: Into<Expression>>(
+        self,
+        source: datafusion::prelude::DataFrame,
+        predicate: E,
+    ) -> crate::operations::schema_evolution::SchemaAwareMergeBuilder {
+        let merge_builder = self.merge(source, predicate);
+        crate::operations::schema_evolution::SchemaAwareMergeBuilder::new(merge_builder)
     }
 }
 

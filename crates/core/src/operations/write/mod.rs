@@ -32,12 +32,16 @@ pub(crate) mod schema_evolution;
 pub mod writer;
 
 use arrow_schema::Schema;
+use arrow_schema::DataType;
 pub use configs::WriterStatsConfig;
 use datafusion::execution::SessionStateBuilder;
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
-use generated_columns::{able_to_gc, add_generated_columns, add_missing_generated_columns};
+use delta_kernel::engine::arrow_conversion::TryIntoArrow;
+use delta_kernel::table_features::{ReaderFeature, WriterFeature};
+use generated_columns::{able_to_gc, add_generated_columns, add_missing_generated_columns, add_column_mapping_metadata, get_max_column_id};
 use metrics::{WriteMetricExtensionPlanner, SOURCE_COUNT_ID, SOURCE_COUNT_METRIC};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -105,7 +109,7 @@ impl From<WriteError> for DeltaTableError {
 }
 
 ///Specifies how to handle schema drifts
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SchemaMode {
     /// Overwrite the schema with the new schema
     Overwrite,
@@ -312,6 +316,16 @@ impl WriteBuilder {
         self
     }
 
+    /// Set a single table configuration property
+    pub fn with_table_configuration(
+        mut self,
+        key: impl Into<String>,
+        value: Option<impl Into<String>>,
+    ) -> Self {
+        self.configuration.insert(key.into(), value.map(|v| v.into()));
+        self
+    }
+
     /// Execution plan that produces the data to be written to the delta table
     pub fn with_input_batches(mut self, batches: impl IntoIterator<Item = RecordBatch>) -> Self {
         let ctx = SessionContext::new();
@@ -468,7 +482,69 @@ impl std::future::IntoFuture for WriteBuilder {
             // so they might be empty in the batch, but the will exist in the input_schema()
             // in this case we have to insert the generated column and it's type in the schema of the batch
             let mut new_schema = None;
-            if let Some(snapshot) = &this.snapshot {
+            let mut merged_schema_for_overwrite = None;
+            let mut schema_drift = false;
+            
+            debug!("🚀 Starting write operation: mode={:?}, schema_mode={:?}, has_snapshot={}", 
+                   this.mode, this.schema_mode, this.snapshot.is_some());
+            debug!("🚀 Configuration: {:?}", this.configuration);
+            
+            if this.schema_mode == Some(SchemaMode::Merge)
+                && this.snapshot.is_some()
+                && source_schema.as_ref() != this.snapshot.as_ref().unwrap().input_schema()?.as_ref()
+            {
+                let metadata = this.snapshot.as_ref().unwrap().metadata();
+                let table_schema = this.snapshot.as_ref().unwrap().input_schema()?;
+                new_schema = Some(merge_arrow_schema(
+                    table_schema.clone(),
+                    source_schema.clone(),
+                    true,  // preserve_new_fields = true for schema merge mode
+                )?);
+                schema_drift = true;
+                
+                // Store a clone for later use in overwrite logic
+                merged_schema_for_overwrite = new_schema.clone();
+
+                // Handle column mapping for new columns automatically
+                if this.configuration.get("delta.columnMapping.mode")
+                    .and_then(|v| v.as_ref())
+                    .map(|v| v.as_str())
+                    .unwrap_or("none") == "name" {
+                    
+                    // Detect new columns that need column mapping metadata
+                    let table_fields: HashSet<String> = table_schema.fields()
+                        .iter()
+                        .map(|f| f.name().clone())
+                        .collect();
+                    
+                    let source_fields: HashSet<String> = source_schema.fields()
+                        .iter()
+                        .map(|f| f.name().clone())
+                        .collect();
+                    
+                    let new_columns: Vec<String> = source_fields
+                        .difference(&table_fields)
+                        .cloned()
+                        .collect();
+                    
+                    if !new_columns.is_empty() {
+                        // Add column mapping metadata for new columns
+                        if let Some(ref mut evolved_schema) = new_schema {
+                            let schema_struct: StructType = evolved_schema.clone().try_into_kernel()?;
+                            let enhanced_schema = add_column_mapping_metadata(schema_struct, false)?;
+                            let enhanced_arrow_schema: arrow_schema::Schema = (&enhanced_schema).try_into_arrow()?;
+                            *evolved_schema = Arc::new(enhanced_arrow_schema);
+                        }
+                        // Also update the overwrite copy
+                        if let Some(ref mut evolved_schema) = merged_schema_for_overwrite {
+                            let schema_struct: StructType = evolved_schema.clone().try_into_kernel()?;
+                            let enhanced_schema = add_column_mapping_metadata(schema_struct, false)?;
+                            let enhanced_arrow_schema: arrow_schema::Schema = (&enhanced_schema).try_into_arrow()?;
+                            *evolved_schema = Arc::new(enhanced_arrow_schema);
+                        }
+                    }
+                }
+            } else if let Some(snapshot) = &this.snapshot {
                 let table_schema = snapshot.input_schema()?;
 
                 if let Err(schema_err) =
@@ -485,6 +561,8 @@ impl std::future::IntoFuture for WriteBuilder {
                             source_schema.clone(),
                             schema_drift,
                         )?);
+                        // Store a clone for later use in overwrite logic
+                        merged_schema_for_overwrite = new_schema.clone();
                     } else {
                         return Err(schema_err.into());
                     }
@@ -496,13 +574,112 @@ impl std::future::IntoFuture for WriteBuilder {
                     // Schema needs to be merged so that utf8/binary/list types are preserved from the batch side if both table
                     // and batch contains such type. Other types are preserved from the table side.
                     // At this stage it will never introduce more fields since try_cast_batch passed correctly.
-                    new_schema = Some(merge_arrow_schema(
-                        table_schema.clone(),
-                        source_schema.clone(),
-                        schema_drift,
-                    )?);
+                    
+                    // IMPORTANT FIX: When column mapping is enabled, we need to preserve table schema types
+                    // to avoid type mismatches that cause null data
+                    let preserve_table_types = this.configuration
+                        .get("delta.columnMapping.mode")
+                        .and_then(|v| v.as_ref())
+                        .map(|v| v.as_str())
+                        .unwrap_or("none") == "name";
+                    
+                    if preserve_table_types {
+                        debug!("🔍 Column mapping enabled: preserving table schema types");
+                        // For column mapping, preserve table types by reversing the merge order
+                        let merged_schema = merge_arrow_schema(
+                            source_schema.clone(),  // source first
+                            table_schema.clone(),   // table second (takes precedence)
+                            false, // preserve_new_fields = false
+                        )?;
+                        
+                        // CRITICAL FIX: Preserve column mapping metadata from table schema
+                        // The merge operation loses column mapping metadata, so we need to restore it
+                        let mut final_fields = Vec::new();
+                        for field in merged_schema.fields() {
+                            if let Ok(table_field) = table_schema.field_with_name(field.name()) {
+                                // Use the table field (which has column mapping metadata) but with potentially updated type
+                                let mut preserved_field = table_field.clone();
+                                if field.data_type() != table_field.data_type() {
+                                    // Update the data type while preserving metadata
+                                    preserved_field = (**field).clone().with_metadata(table_field.metadata().clone());
+                                }
+                                final_fields.push(preserved_field);
+                            } else {
+                                // Field doesn't exist in table, use as-is
+                                final_fields.push((**field).clone());
+                            }
+                        }
+                        
+                        new_schema = Some(Arc::new(Schema::new_with_metadata(
+                            final_fields,
+                            merged_schema.metadata().clone()
+                        )));
+                    } else {
+                        new_schema = Some(merge_arrow_schema(
+                            table_schema.clone(),
+                            source_schema.clone(),
+                            schema_drift,
+                        )?);
+                    }
                 }
             }
+            
+            debug!("🔍 Before column mapping fix: new_schema.is_none()={}", new_schema.is_none());
+            
+            // IMPORTANT FIX: Handle column mapping with type casting
+            if new_schema.is_none() && this.snapshot.is_some() {
+                debug!("🔍 Checking column mapping casting: new_schema.is_none()={}, snapshot.is_some()={}", 
+                       new_schema.is_none(), this.snapshot.is_some());
+                       
+                let column_mapping_mode = this.configuration
+                    .get("delta.columnMapping.mode")
+                    .and_then(|v| v.as_ref())
+                    .map(|v| v.as_str())
+                    .unwrap_or("none");
+                    
+                debug!("🔍 Column mapping mode: {}", column_mapping_mode);
+                    
+                if column_mapping_mode == "name" {
+                    let table_schema = this.snapshot.as_ref().unwrap().input_schema()?;
+                    
+                    debug!("🔍 Table schema fields: {:?}", table_schema.fields().iter().map(|f| format!("{}:{:?}", f.name(), f.data_type())).collect::<Vec<_>>());
+                    debug!("🔍 Source schema fields: {:?}", source_schema.fields().iter().map(|f| format!("{}:{:?}", f.name(), f.data_type())).collect::<Vec<_>>());
+                    
+                    // Check if we need casting for type compatibility (e.g., large_string -> string)
+                    let needs_casting = source_schema.fields().iter().any(|source_field| {
+                        if let Some(table_field) = table_schema.field_with_name(source_field.name()).ok() {
+                            // Check if types are compatible but need casting (like large_string -> string)
+                            let type_mismatch = match (source_field.data_type(), table_field.data_type()) {
+                                (DataType::LargeUtf8, DataType::Utf8) |
+                                (DataType::Utf8, DataType::LargeUtf8) |
+                                (DataType::LargeBinary, DataType::Binary) |
+                                (DataType::Binary, DataType::LargeBinary) => {
+                                    debug!("🔍 Found type mismatch for field {}: {:?} -> {:?}", 
+                                           source_field.name(), source_field.data_type(), table_field.data_type());
+                                    true
+                                },
+                                _ => !source_field.data_type().equals_datatype(table_field.data_type())
+                            };
+                            type_mismatch
+                        } else {
+                            false
+                        }
+                    });
+                    
+                    debug!("🔍 Needs casting: {}", needs_casting);
+                    
+                    if needs_casting {
+                        debug!("🔍 Applying column mapping casting fix!");
+                        // Merge schemas to get proper casting targets while preserving table types
+                        new_schema = Some(merge_arrow_schema(
+                            table_schema.clone(),
+                            source_schema.clone(),
+                            false, // preserve_new_fields = false since we're not adding new fields
+                        )?);
+                    }
+                }
+            }
+            
             if let Some(new_schema) = new_schema {
                 let mut schema_evolution_projection = Vec::new();
                 for field in new_schema.fields() {
@@ -557,6 +734,7 @@ impl std::future::IntoFuture for WriteBuilder {
             // Maybe create schema action
             if this.schema_mode == Some(SchemaMode::Merge) && schema_drift {
                 if let Some(snapshot) = &this.snapshot {
+                    let _metadata = this.snapshot.as_ref().unwrap().metadata();
                     let schema_struct: StructType = schema.clone().try_into_kernel()?;
                     // Verify if delta schema changed
                     if &schema_struct != snapshot.schema() {
@@ -609,7 +787,7 @@ impl std::future::IntoFuture for WriteBuilder {
                 Some(super::get_target_file_size(&config, &this.configuration) as usize)
             });
             let (num_indexed_cols, stats_columns) =
-                super::get_num_idx_cols_and_stats_columns(config, this.configuration);
+                super::get_num_idx_cols_and_stats_columns(config, this.configuration.clone());
 
             let writer_stats_config = WriterStatsConfig {
                 num_indexed_cols,
@@ -621,20 +799,78 @@ impl std::future::IntoFuture for WriteBuilder {
             // Collect remove actions if we are overwriting the table
             if let Some(snapshot) = &this.snapshot {
                 if matches!(this.mode, SaveMode::Overwrite) {
-                    let delta_schema: StructType = schema.as_ref().try_into_kernel()?;
+                    // For schema_mode="merge", use the merged schema if it exists
+                    // Otherwise, use the current data schema  
+                    let mut delta_schema: StructType = if this.schema_mode == Some(SchemaMode::Merge) && merged_schema_for_overwrite.is_some() {
+                        // Use the merged schema that was created in the schema evolution logic
+                        merged_schema_for_overwrite.as_ref().unwrap().as_ref().try_into_kernel()?
+                    } else {
+                        // Use the current data schema as before
+                        schema.as_ref().try_into_kernel()?
+                    };
+                    
+                    // Check if column mapping is being enabled
+                    let column_mapping_mode = this.configuration
+                        .get("delta.columnMapping.mode")
+                        .and_then(|mode| mode.as_ref())
+                        .map(|mode| mode.as_str())
+                        .unwrap_or("none");
+                    
+                    let current_column_mapping = snapshot.metadata().configuration
+                        .get("delta.columnMapping.mode")
+                        .and_then(|mode| mode.as_ref())
+                        .map(|mode| mode.as_str())
+                        .unwrap_or("none");
+                        
+                    // If enabling column mapping for the first time or column mapping is already enabled
+                    if column_mapping_mode == "name" && (current_column_mapping == "none" || current_column_mapping == "name") {
+                        // Add column mapping metadata to schema
+                        delta_schema = add_column_mapping_metadata(delta_schema, current_column_mapping == "none")?;
+                    }
+                    
                     // Update metadata with new schema if there is a change
                     if &delta_schema != snapshot.schema() {
                         let mut metadata = snapshot.metadata().clone();
+                        
+                        // Update configuration if column mapping is being enabled
+                        if column_mapping_mode == "name" && current_column_mapping != "name" {
+                            let mut configuration = metadata.configuration.clone();
+                            configuration.insert("delta.columnMapping.mode".to_string(), Some("name".to_string()));
+                            let max_column_id = get_max_column_id(&delta_schema);
+                            configuration.insert("delta.columnMapping.maxColumnId".to_string(), Some(max_column_id.to_string()));
+                            metadata.configuration = configuration;
+                        }
 
+                        let metadata_for_config = metadata.clone();
                         metadata.schema_string = serde_json::to_string(&delta_schema)?;
                         actions.push(Action::Metadata(metadata));
 
-                        let configuration = snapshot.metadata().configuration.clone();
+                        let configuration = if column_mapping_mode == "name" && current_column_mapping != "name" {
+                            // Use the updated configuration
+                            metadata_for_config.configuration.clone()
+                        } else {
+                            snapshot.metadata().configuration.clone()
+                        };
+                        
                         let current_protocol = snapshot.protocol();
-                        let new_protocol = current_protocol
+                        let mut new_protocol = current_protocol
                             .clone()
                             .apply_column_metadata_to_protocol(&delta_schema)?
                             .move_table_properties_into_features(&configuration);
+                            
+                        // Enable column mapping features if needed
+                        if column_mapping_mode == "name" && current_column_mapping != "name" {
+                            let mut reader_features = new_protocol.reader_features.unwrap_or_default();
+                            reader_features.insert(ReaderFeature::ColumnMapping);
+                            
+                            let mut writer_features = new_protocol.writer_features.unwrap_or_default();
+                            writer_features.insert(WriterFeature::ColumnMapping);
+                            
+                            new_protocol.reader_features = Some(reader_features);
+                            new_protocol.writer_features = Some(writer_features);
+                            new_protocol.min_reader_version = 2;
+                            new_protocol.min_writer_version = 5;
+                        }
 
                         if current_protocol != &new_protocol {
                             actions.push(new_protocol.into())
@@ -702,6 +938,7 @@ impl std::future::IntoFuture for WriteBuilder {
                 writer_stats_config.clone(),
                 predicate.clone(),
                 contains_cdc,
+                Some(this.configuration.clone()),
             )
             .await?;
 
