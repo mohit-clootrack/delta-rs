@@ -2,7 +2,11 @@
 
 ## Overview
 
-Implement full support for Delta Lake column mapping mode (`name` and `id`) in delta-rs, enabling reading tables where logical column names differ from physical Parquet column names.
+Enable support for Delta Lake column mapping mode (`name` and `id`) in delta-rs, allowing reading tables where logical column names differ from physical Parquet column names.
+
+## Status: Read Support Complete ✅
+
+Column mapping read support is now fully functional through the delta_kernel integration.
 
 ## Background
 
@@ -10,107 +14,78 @@ Implement full support for Delta Lake column mapping mode (`name` and `id`) in d
 - **`name` mode**: Uses `delta.columnMapping.physicalName` field metadata
 - **`id` mode**: Uses Parquet `field_id` via `delta.columnMapping.id` field metadata
 
-**Root Cause of Current Issues** (Issues #930, #2914, #3348):
-- `partitioned_file_from_action()` looks up partition values using **logical names**
-- Transaction log stores partition values with **physical names** (e.g., `"col-abc123": "value"`)
-- Schema adapter matches columns by name without physical/logical translation
+## Implementation Summary
 
-## Implementation Checklist
+### Completed ✅
 
-### Phase 0: Setup
-- [x] Add upstream remote: `git remote add upstream https://github.com/delta-io/delta-rs.git`
-- [x] Fetch latest from upstream: `git fetch upstream`
-- [x] Merge upstream main into working branch
-- [x] Resolve any merge conflicts
-- [x] Verify build works: `cargo build -p deltalake-core`
+#### Phase 0: Setup
+- [x] Add upstream remote and fetch latest changes
+- [x] Merge upstream main (delta_kernel 0.19.0) into working branch
+- [x] Verify build works
 
-### Phase 1: Core Infrastructure
-- [ ] Create `crates/core/src/kernel/column_mapping.rs` with `ColumnMappingResolver` struct
-  - Bidirectional mapping: physical <-> logical names
-  - Support for both `name` and `id` modes
-  - Helper methods: `to_physical()`, `to_logical()`, `is_identity()`
-- [ ] Add `column_mapping_resolver()` method to `Snapshot` and `EagerSnapshot`
-- [ ] Export module in `crates/core/src/kernel/mod.rs`
+#### Read Support (Already Implemented in Upstream)
+The "next" scan implementation in `delta_datafusion/table_provider/next/` already handles column mapping correctly:
 
-### Phase 2: Fix Partition Value Handling (Critical)
-- [ ] Update `partitioned_file_from_action()` in `crates/core/src/delta_datafusion/mod.rs`:
-  - Add `ColumnMappingResolver` parameter
-  - Use physical name for `action.partition_values` HashMap lookup
-  - Keep logical name for schema field lookup
-- [ ] Update `DeltaScanBuilder::build()` to pass column mapping resolver
+- [x] `parse_partitions()` in `scan_row.rs` uses `field.physical_name(column_mapping_mode)` to map partition values
+- [x] `rewrite_expression()` in `scan/plan.rs` transforms predicates from logical to physical names
+- [x] `DeltaScanExec` handles statistics with physical column names
+- [x] Schema transformation via `schema.make_physical(column_mapping_mode)` from delta_kernel
 
-### Phase 3: Fix Schema Adapter for Parquet Reading
-- [ ] Update `DeltaSchemaAdapterFactory` in `crates/core/src/delta_datafusion/schema_adapter.rs`:
-  - Add `column_mapping` field
-  - Constructor accepts `Option<ColumnMappingResolver>`
-- [ ] Update `DeltaSchemaAdapter::map_column_index()`:
-  - For `name` mode: lookup by physical name in Parquet schema
-  - For `id` mode: lookup by field_id in Parquet schema
-- [ ] Update `SchemaMapping::map_batch()`:
-  - Rename columns from physical to logical names after reading
+#### Testing
+- [x] Rust integration tests (`crates/core/tests/integration_column_mapping.rs`)
+  - test_read_table_with_column_mapping
+  - test_datafusion_query_with_column_mapping
+  - test_partition_filter_with_column_mapping
+  - test_statistics_with_column_mapping
+  - test_projection_with_column_mapping
+  - test_physical_name_access
+  - test_full_table_scan_with_column_mapping
 
-### Phase 4: Fix Statistics Handling
-- [ ] Update `resolve_column_value_stat()` in `crates/core/src/table/state_arrow.rs`:
-  - Accept column mapping resolver
-  - Translate logical path segments to physical for stats lookup
-- [ ] Update `resolve_column_count_stat()` similarly
-- [ ] Update `stats_as_batch()` to use column mapping
+- [x] Python tests (`python/tests/test_column_mapping.py`)
+  - test_load_table_with_column_mapping
+  - test_schema_has_logical_names
+  - test_read_to_pyarrow
+  - test_read_to_pandas
+  - test_filter_on_partition_column
+  - test_metadata
+  - test_datafusion_select_all
+  - test_datafusion_select_with_quotes
 
-### Phase 5: Write Support (Future Work)
-> **Note:** Write support requires significant changes and is currently disabled.
-> The `ColumnMapping` feature is commented out in `protocol.rs` ProtocolChecker.
+#### Python Bindings
+- [x] Enable reader version 2 (required for column mapping)
+- [x] Add `columnMapping` to supported reader features
+- [x] Remove explicit block on column mapping in `to_pyarrow_dataset()`
+
+### Future Work (Write Support)
+
+> **Note:** Write support requires additional changes and is not yet implemented.
+> The `ColumnMapping` feature is currently commented out in `protocol.rs` ProtocolChecker.
 
 - [ ] Enable `TableFeature::ColumnMapping` in `kernel/transaction/protocol.rs`
 - [ ] Update `WriterConfig` to accept column mapping mode
-- [ ] Transform Arrow schema fields to physical names before writing Parquet:
-  - Add `file_schema_physical()` method using `make_physical()` from delta_kernel
-- [ ] Transform partition values to physical names in `Add` actions:
-  - Modify `create_add()` in `writer/stats.rs`
-- [ ] Verify statistics are correct (should already work since stats come from Parquet)
-
-### Phase 6: Python Bindings
-- [ ] Add `column_mapping_mode()` method to `RawDeltaTable` in `python/src/lib.rs`
-- [ ] Add `physical_name(logical_name)` method
-- [ ] Update Python type stubs in `python/deltalake/_internal.pyi`
-
-### Phase 7: Testing
-- [ ] Unit tests for `ColumnMappingResolver`
-- [ ] Integration test: read table with column mapping (use existing test data)
-- [ ] Integration test: DataFusion query with column mapping
-- [ ] Integration test: partition pruning with column mapping
-- [ ] Integration test: write to table with column mapping
-- [ ] Integration test: roundtrip (write then read) with column mapping
-- [ ] Python test: read table with column mapping
-- [ ] Python test: write to table with column mapping
-- [ ] Test all data types with column mapping (primitives, nested structs, arrays, maps)
-
-### Phase 8: Verification
-- [ ] Remove `column_mapping` from DAT skipped tests if applicable
-- [ ] Run full test suite
-- [ ] Test with sample tables created by Spark/Databricks
+- [ ] Transform Arrow schema fields to physical names before writing Parquet
+- [ ] Transform partition values to physical names in `Add` actions
+- [ ] Verify statistics are correct
 
 ---
 
-## Key Files to Modify
+## Key Files
 
-| File | Purpose |
-|------|---------|
-| `crates/core/src/kernel/column_mapping.rs` | NEW - Core column mapping utilities |
-| `crates/core/src/delta_datafusion/mod.rs` | Fix `partitioned_file_from_action()` |
-| `crates/core/src/delta_datafusion/schema_adapter.rs` | Physical/logical name mapping for Parquet |
-| `crates/core/src/table/state_arrow.rs` | Statistics with column mapping |
-| `crates/core/src/kernel/snapshot/mod.rs` | Add resolver access methods |
-| `crates/core/src/operations/write/writer.rs` | Write support with physical names |
-| `crates/core/src/protocol/mod.rs` | Protocol version handling for column mapping |
-| `python/src/lib.rs` | Python bindings |
+| File | Description |
+|------|-------------|
+| `crates/core/src/kernel/snapshot/iterators/scan_row.rs` | Partition value parsing with physical names |
+| `crates/core/src/delta_datafusion/table_provider/next/scan/plan.rs` | Predicate rewriting for physical names |
+| `crates/core/src/delta_datafusion/table_provider/next/scan/exec.rs` | Statistics handling with column mapping |
+| `crates/core/src/kernel/arrow/engine_ext.rs` | `make_physical()` and stats schema utilities |
+| `python/deltalake/table.py` | Python protocol feature support |
 
 ---
 
 ## Test Data
 
-Existing test table: `/home/user/delta-rs/crates/test/tests/data/table_with_column_mapping/`
+Existing test table: `crates/test/tests/data/table_with_column_mapping/`
 
-Schema fields use metadata like:
+Schema with column mapping metadata:
 ```json
 {
   "name": "Company Very Short",
@@ -121,44 +96,45 @@ Schema fields use metadata like:
 }
 ```
 
-Partition values in log use physical names:
+Partition values in transaction log use physical names:
 ```json
 {"partitionValues": {"col-173b4db9-b5ad-427f-9e75-516aae37fbbb": "BMS"}}
 ```
 
 ---
 
-## Edge Cases
+## Verification
 
-1. **Nested structs**: Apply mapping recursively
-2. **Missing metadata**: Validate with `validate_schema_column_mapping()`, return clear error
-3. **Mixed stats names**: Try physical first, fall back to logical
-4. **`id` mode**: Match by Parquet field_id, not by name
+### Rust
+```bash
+cargo test -p deltalake-core --test integration_column_mapping --features datafusion
+```
+
+### Python
+```bash
+cd python
+source .venv/bin/activate
+pytest tests/test_column_mapping.py -v
+```
+
+### Manual Verification
+```python
+import deltalake
+dt = deltalake.DeltaTable("crates/test/tests/data/table_with_column_mapping")
+print(dt.schema())  # Shows logical column names with metadata
+print(dt.to_pandas())  # Data with logical column names
+
+from datafusion import SessionContext
+ctx = SessionContext()
+ctx.register_table("test", dt.to_pyarrow_dataset())
+result = ctx.sql('SELECT "Company Very Short", "Super Name" FROM test').collect()
+print(result)
+```
 
 ---
 
 ## Backward Compatibility
 
 - `ColumnMappingMode::None` preserves existing behavior exactly
-- No public API signature changes
-- All internal parameters added are optional or backward-compatible
-
----
-
-## Verification Plan
-
-1. Run existing tests: `cargo test -p deltalake-core`
-2. Run Python tests: `cd python && pytest tests/`
-3. Manual verification with test table:
-   ```python
-   import deltalake
-   dt = deltalake.DeltaTable("crates/test/tests/data/table_with_column_mapping")
-   print(dt.to_pandas())  # Should show data with logical column names
-   ```
-4. DataFusion query verification:
-   ```python
-   from datafusion import SessionContext
-   ctx = SessionContext()
-   ctx.register_table("test", dt.to_pyarrow_dataset())
-   ctx.sql('SELECT "Company Very Short" FROM test').collect()
-   ```
+- No breaking API changes
+- All existing tests continue to pass
