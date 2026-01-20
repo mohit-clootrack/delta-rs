@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::vec;
 
@@ -12,6 +13,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit, when};
 use datafusion::physical_plan::{ExecutionPlan, execute_stream_partitioned};
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
+use delta_kernel::table_features::ColumnMappingMode;
 use futures::StreamExt;
 use itertools::Itertools as _;
 use object_store::prefix::PrefixStore;
@@ -34,6 +36,41 @@ use crate::operations::write::WriterStatsConfig;
 use crate::table::config::TablePropertiesExt as _;
 
 const DEFAULT_WRITER_BATCH_CHANNEL_SIZE: usize = 10;
+
+/// Build a mapping from logical column names to physical column names
+/// based on the schema and column mapping mode.
+fn build_logical_to_physical_mapping(
+    schema: &StructType,
+    column_mapping_mode: ColumnMappingMode,
+) -> HashMap<String, String> {
+    if column_mapping_mode == ColumnMappingMode::None {
+        return HashMap::new();
+    }
+
+    fn collect_mappings(
+        schema: &StructType,
+        column_mapping_mode: ColumnMappingMode,
+        result: &mut HashMap<String, String>,
+    ) {
+        for field in schema.fields() {
+            let logical_name = field.name().to_string();
+            let physical_name = field.physical_name(column_mapping_mode).to_string();
+
+            if logical_name != physical_name {
+                result.insert(logical_name.clone(), physical_name);
+            }
+
+            // Recursively handle nested structs
+            if let delta_kernel::schema::DataType::Struct(nested) = field.data_type() {
+                collect_mappings(nested.as_ref(), column_mapping_mode, result);
+            }
+        }
+    }
+
+    let mut mappings = HashMap::new();
+    collect_mappings(schema, column_mapping_mode, &mut mappings);
+    mappings
+}
 
 fn channel_size() -> usize {
     static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
@@ -300,10 +337,19 @@ pub(crate) async fn write_execution_plan_v2(
 
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
+    // Get column mapping mode and build logical-to-physical name mapping if applicable
+    let (column_mapping_mode, logical_to_physical) = if let Some(snapshot) = snapshot {
+        let mode = snapshot.table_configuration().column_mapping_mode();
+        let mapping = build_logical_to_physical_mapping(&snapshot.schema(), mode);
+        (mode, mapping)
+    } else {
+        (ColumnMappingMode::None, HashMap::new())
+    };
+
     // Write data to disk
     // We drive partition streams concurrently and centralize writes via an mpsc channel.
     if !contains_cdc {
-        let config = WriterConfig::new(
+        let config = WriterConfig::new_with_column_mapping(
             schema.clone(),
             partition_columns.clone(),
             writer_properties.clone(),
@@ -311,6 +357,8 @@ pub(crate) async fn write_execution_plan_v2(
             write_batch_size,
             writer_stats_config.num_indexed_cols,
             writer_stats_config.stats_columns.clone(),
+            column_mapping_mode,
+            logical_to_physical,
         );
 
         let partition_streams: Vec<SendableRecordBatchStream> =
@@ -393,7 +441,7 @@ pub(crate) async fn write_execution_plan_v2(
         ));
         let cdf_schema = schema.clone();
 
-        let normal_config = WriterConfig::new(
+        let normal_config = WriterConfig::new_with_column_mapping(
             write_schema.clone(),
             partition_columns.clone(),
             writer_properties.clone(),
@@ -401,9 +449,11 @@ pub(crate) async fn write_execution_plan_v2(
             write_batch_size,
             writer_stats_config.num_indexed_cols,
             writer_stats_config.stats_columns.clone(),
+            column_mapping_mode,
+            logical_to_physical.clone(),
         );
 
-        let cdf_config = WriterConfig::new(
+        let cdf_config = WriterConfig::new_with_column_mapping(
             cdf_schema.clone(),
             partition_columns.clone(),
             writer_properties.clone(),
@@ -411,6 +461,8 @@ pub(crate) async fn write_execution_plan_v2(
             write_batch_size,
             writer_stats_config.num_indexed_cols,
             writer_stats_config.stats_columns.clone(),
+            column_mapping_mode,
+            logical_to_physical.clone(),
         );
 
         // partition streams
