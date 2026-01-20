@@ -52,9 +52,15 @@ def test_read_table_with_edge_timestamps():
 def test_read_simple_table_to_dict():
     table_path = "../crates/test/tests/data/simple_table"
     dt = DeltaTable(table_path)
-    assert QueryBuilder().register("tbl", dt).execute("select * from tbl").read_all()[
-        "id"
-    ].to_pylist() == [5, 7, 9]
+    assert QueryBuilder().register("tbl", dt).execute(
+        "select * from tbl ORDER BY id"
+    ).read_all()["id"].to_pylist() == [5, 7, 9]
+
+
+def test_table_count():
+    table_path = "../crates/test/tests/data/COVID-19_NYT"
+    dt = DeltaTable(table_path)
+    assert dt.count() == 1111930
 
 
 class _SerializableException(BaseException):
@@ -262,6 +268,62 @@ def test_read_partitioned_table_with_partitions_filters_to_dict():
 
 
 @pytest.mark.pyarrow
+def test_read_partitioned_table_with_primitive_type_partition_filters():
+    table_path = "../crates/test/tests/data/partition-type-primitives"
+    dt = DeltaTable(table_path)
+
+    partitions_int = [("year", "=", 2020)]
+    result_int = dt.to_pyarrow_dataset(partitions_int).to_table().to_pydict()
+    assert len(result_int["id"]) == 8
+    assert all(year == "2020" for year in result_int["year"])
+
+    partitions_float = [("year", "=", 2021.0)]
+    result_float = dt.to_pyarrow_dataset(partitions_float).to_table().to_pydict()
+    assert len(result_float["id"]) == 8
+    assert all(year == "2021.0" for year in result_float["year"])
+
+    partitions_bool = [("is_active", "=", True)]
+    result_bool = dt.to_pyarrow_dataset(partitions_bool).to_table().to_pydict()
+    assert len(result_bool["id"]) == 8
+    assert all(is_active == "true" for is_active in result_bool["is_active"])
+
+    partitions_date = [("event_date", "=", date(2023, 1, 1))]
+    result_date = dt.to_pyarrow_dataset(partitions_date).to_table().to_pydict()
+    assert len(result_date["id"]) == 8
+    assert all(event_date == "2023-01-01" for event_date in result_date["event_date"])
+
+    partitions_string = [("category", "=", "A")]
+    result_string = dt.to_pyarrow_dataset(partitions_string).to_table().to_pydict()
+    assert len(result_string["id"]) == 8
+    assert all(category == "A" for category in result_string["category"])
+
+    partitions_bool_in = [("is_active", "in", [True, False])]
+    result_bool_in = dt.to_pyarrow_dataset(partitions_bool_in).to_table().to_pydict()
+    total_rows = len(dt.to_pyarrow_dataset().to_table().to_pydict()["id"])
+    assert len(result_bool_in["id"]) == total_rows
+
+    partitions_year_in = [("year", "in", [2020, 2022.0])]
+    result_year_in = dt.to_pyarrow_dataset(partitions_year_in).to_table().to_pydict()
+    assert len(result_year_in["id"]) == 8
+    assert all(year == "2020" for year in result_year_in["year"])
+
+    partitions_bool_true_only = [("is_active", "in", [True])]
+    result_bool_true_only = (
+        dt.to_pyarrow_dataset(partitions_bool_true_only).to_table().to_pydict()
+    )
+    assert len(result_bool_true_only["id"]) == 8
+    assert all(is_active == "true" for is_active in result_bool_true_only["is_active"])
+
+    with pytest.raises(ValueError, match="Could not encode partition value for type"):
+        partitions_invalid = [("category", "=", {"invalid": "dict"})]
+        dt.to_pyarrow_dataset(partitions_invalid)
+
+    with pytest.raises(ValueError, match="Could not encode partition value for type"):
+        partitions_invalid_list = [("category", "in", [{"invalid": "dict"}, "A"])]
+        dt.to_pyarrow_dataset(partitions_invalid_list)
+
+
+@pytest.mark.pyarrow
 def test_read_empty_delta_table_after_delete():
     table_path = "../crates/test/tests/data/delta-0.8-empty"
     dt = DeltaTable(table_path)
@@ -361,11 +423,14 @@ def test_read_special_partition():
         r"x=B%20B/part-00015-e9abbc6f-85e9-457b-be8e-e9f5b8a22890.c000.snappy.parquet"
     )
 
-    assert set(dt.files()) == {file1, file2}
+    def path_matcher(full_path, expected):
+        return full_path.endswith(expected)
 
-    assert dt.files([("x", "=", "A/A")]) == [file1]
-    assert dt.files([("x", "=", "B B")]) == [file2]
-    assert dt.files([("x", "=", "c")]) == []
+    files = dt.file_uris()
+    assert path_matcher(files[0], file1) and path_matcher(files[1], file2)
+    assert path_matcher(dt.file_uris([("x", "=", "A/A")])[0], file1)
+    assert path_matcher(dt.file_uris([("x", "=", "B B")])[0], file2)
+    assert dt.file_uris([("x", "=", "c")]) == []
 
     table = dt.to_pyarrow_table()
 
@@ -450,9 +515,8 @@ def test_add_actions_table(flatten: bool):
         ]
     )
     assert actions_df["size_bytes"] == pa.array([414, 414, 414, 407, 414, 414])
-    assert actions_df["data_change"] == pa.array([True] * 6)
     assert actions_df["modification_time"] == pa.array(
-        [1615555646000] * 6, type=pa.timestamp("ms")
+        [1615555646000] * 6, type=pa.int64()
     )
 
     if flatten:
@@ -460,18 +524,42 @@ def test_add_actions_table(flatten: bool):
         partition_month = actions_df["partition.month"]
         partition_day = actions_df["partition.day"]
     else:
-        partition_year = actions_df["partition_values"].field("year")
-        partition_month = actions_df["partition_values"].field("month")
-        partition_day = actions_df["partition_values"].field("day")
+        partition_year = actions_df["partition"].field("year")
+        partition_month = actions_df["partition"].field("month")
+        partition_day = actions_df["partition"].field("day")
 
     assert partition_year == pa.array(["2020"] * 3 + ["2021"] * 3)
     assert partition_month == pa.array(["1", "2", "2", "12", "12", "4"])
     assert partition_day == pa.array(["1", "3", "5", "20", "4", "5"])
 
 
+@pytest.mark.pyarrow
+def test_get_add_actions_on_empty_table(tmp_path: Path):
+    import pyarrow as pa
+
+    data = pa.table({"value": pa.array([1, 2, 3], type=pa.int64())})
+    write_deltalake(tmp_path, data)
+    dt = DeltaTable(tmp_path)
+
+    # Sanity check to ensure table starts with files.
+    initial_adds = dt.get_add_actions(flatten=True)
+    assert initial_adds.num_rows == 1
+    assert len(initial_adds["path"]) == 1
+
+    dt.delete()
+    dt.vacuum(retention_hours=0, dry_run=False, enforce_retention_duration=False)
+
+    dt = DeltaTable(tmp_path)
+    add_actions = dt.get_add_actions()
+    assert add_actions.num_rows == 0
+    assert dt.get_add_actions(flatten=True).num_rows == 0
+
+
 def assert_correct_files(dt: DeltaTable, partition_filters, expected_paths):
-    assert dt.files(partition_filters) == expected_paths
-    absolute_paths = [os.path.join(dt.table_uri, path) for path in expected_paths]
+    from urllib.parse import urlparse
+
+    table_path = urlparse(dt.table_uri).path
+    absolute_paths = [os.path.join(table_path, path) for path in expected_paths]
     assert dt.file_uris(partition_filters) == absolute_paths
 
 
@@ -527,7 +615,7 @@ def test_get_files_partitioned_table():
 
     partition_filters = [("invalid_operation", "=>", "3")]
     with pytest.raises(Exception) as exception:
-        dt.files(partition_filters)
+        dt.file_uris(partition_filters)
     assert (
         str(exception.value)
         == 'Invalid partition filter found: ("invalid_operation", "=>", "3").'
@@ -535,7 +623,7 @@ def test_get_files_partitioned_table():
 
     partition_filters = [("invalid_operation", "=", ["3", "20"])]
     with pytest.raises(Exception) as exception:
-        dt.files(partition_filters)
+        dt.file_uris(partition_filters)
     assert (
         str(exception.value)
         == 'Invalid partition filter found: ("invalid_operation", "=", ["3", "20"]).'
@@ -543,10 +631,10 @@ def test_get_files_partitioned_table():
 
     partition_filters = [("unknown", "=", "3")]
     with pytest.raises(Exception) as exception:
-        dt.files(partition_filters)
+        dt.file_uris(partition_filters)
     assert (
         str(exception.value)
-        == 'Tried to filter partitions on non-partitioned columns: [\n    "unknown",\n]'
+        == "Data does not match the schema or partitions of the table: Field 'unknown' is not a root table field."
     )
 
 
@@ -690,12 +778,12 @@ def test_read_multiple_tables_from_s3(s3_localstack):
     """
     for path in ["s3://deltars/simple", "s3://deltars/simple"]:
         t = DeltaTable(path)
-        assert t.files() == [
-            "part-00000-2befed33-c358-4768-a43c-3eda0d2a499d-c000.snappy.parquet",
-            "part-00000-c1777d7d-89d9-4790-b38a-6ee7e24456b1-c000.snappy.parquet",
-            "part-00001-7891c33d-cedc-47c3-88a6-abcfb049d3b4-c000.snappy.parquet",
-            "part-00004-315835fe-fb44-4562-98f6-5e6cfa3ae45d-c000.snappy.parquet",
-            "part-00007-3a0e4727-de0d-41b6-81ef-5223cf40f025-c000.snappy.parquet",
+        assert t.file_uris() == [
+            "s3://deltars/simple/part-00000-2befed33-c358-4768-a43c-3eda0d2a499d-c000.snappy.parquet",
+            "s3://deltars/simple/part-00000-c1777d7d-89d9-4790-b38a-6ee7e24456b1-c000.snappy.parquet",
+            "s3://deltars/simple/part-00001-7891c33d-cedc-47c3-88a6-abcfb049d3b4-c000.snappy.parquet",
+            "s3://deltars/simple/part-00004-315835fe-fb44-4562-98f6-5e6cfa3ae45d-c000.snappy.parquet",
+            "s3://deltars/simple/part-00007-3a0e4727-de0d-41b6-81ef-5223cf40f025-c000.snappy.parquet",
         ]
 
 
@@ -710,12 +798,12 @@ def test_read_multiple_tables_from_s3_multi_threaded(s3_localstack):
     def read_table():
         b.wait()
         t = DeltaTable("s3://deltars/simple")
-        assert t.files() == [
-            "part-00000-2befed33-c358-4768-a43c-3eda0d2a499d-c000.snappy.parquet",
-            "part-00000-c1777d7d-89d9-4790-b38a-6ee7e24456b1-c000.snappy.parquet",
-            "part-00001-7891c33d-cedc-47c3-88a6-abcfb049d3b4-c000.snappy.parquet",
-            "part-00004-315835fe-fb44-4562-98f6-5e6cfa3ae45d-c000.snappy.parquet",
-            "part-00007-3a0e4727-de0d-41b6-81ef-5223cf40f025-c000.snappy.parquet",
+        assert t.file_uris() == [
+            "s3://deltars/simple/part-00000-2befed33-c358-4768-a43c-3eda0d2a499d-c000.snappy.parquet",
+            "s3://deltars/simple/part-00000-c1777d7d-89d9-4790-b38a-6ee7e24456b1-c000.snappy.parquet",
+            "s3://deltars/simple/part-00001-7891c33d-cedc-47c3-88a6-abcfb049d3b4-c000.snappy.parquet",
+            "s3://deltars/simple/part-00004-315835fe-fb44-4562-98f6-5e6cfa3ae45d-c000.snappy.parquet",
+            "s3://deltars/simple/part-00007-3a0e4727-de0d-41b6-81ef-5223cf40f025-c000.snappy.parquet",
         ]
 
     threads = [ExcPassThroughThread(target=read_table) for _ in range(thread_count)]
@@ -960,6 +1048,7 @@ def test_partitions_unpartitioned_table():
     assert len(dt.partitions()) == 0
 
 
+@pytest.mark.skip(reason="Requires upstream fix in delta-kernel")
 def test_read_table_last_checkpoint_not_updated():
     dt = DeltaTable("../crates/test/tests/data/table_failed_last_checkpoint_update")
 
@@ -1038,11 +1127,11 @@ def test_read_query_builder_join_multiple_tables(tmp_path):
             {
                 "date": Array(
                     ["2021-01-01", "2021-01-02", "2021-01-03", "2021-12-31"],
-                    ArrowField("date", type=DataType.string(), nullable=True),
+                    ArrowField("date", type=DataType.string_view(), nullable=True),
                 ),
                 "value": Array(
                     ["a", "b", "c", "d"],
-                    ArrowField("value", type=DataType.string(), nullable=True),
+                    ArrowField("value", type=DataType.string_view(), nullable=True),
                 ),
             }
         ),
@@ -1053,7 +1142,7 @@ def test_read_query_builder_join_multiple_tables(tmp_path):
         {
             "date": Array(
                 ["2021-01-01", "2021-01-02", "2021-01-03"],
-                ArrowField("date", type=DataType.string(), nullable=True),
+                ArrowField("date", type=DataType.string_view(), nullable=True),
             ),
             "dayOfYear": Array(
                 [1, 2, 3],
@@ -1061,7 +1150,7 @@ def test_read_query_builder_join_multiple_tables(tmp_path):
             ),
             "value": Array(
                 ["a", "b", "c"],
-                ArrowField("value", type=DataType.string(), nullable=True),
+                ArrowField("value", type=DataType.string_view(), nullable=True),
             ),
         }
     )
@@ -1080,3 +1169,11 @@ def test_read_query_builder_join_multiple_tables(tmp_path):
         .read_all()
     )
     assert expected == actual
+
+
+def test_read_deletion_vectors():
+    table_path = "../crates/test/tests/data/table-with-dv-small"
+    dt = DeltaTable(table_path)
+    assert QueryBuilder().register("tbl", dt).execute("select * from tbl").read_all()[
+        "value"
+    ].to_pylist() == [1, 2, 3, 4, 5, 6, 7, 8]

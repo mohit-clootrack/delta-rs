@@ -3,16 +3,16 @@ use std::sync::OnceLock;
 
 use bytes::Bytes;
 use deltalake_derive::DeltaConfig;
-use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use futures::FutureExt;
 use futures::TryFutureExt;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use object_store::path::Path;
 use object_store::{
     Error as ObjectStoreError, GetOptions, GetResult, ListResult, ObjectMeta, ObjectStore,
     PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
 };
-use object_store::{MultipartUpload, PutMultipartOpts};
+use object_store::{MultipartUpload, PutMultipartOptions};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 
@@ -108,18 +108,15 @@ impl IORuntime {
 #[derive(Clone)]
 pub struct DeltaIOStorageBackend<T: ObjectStore + Clone> {
     pub inner: T,
-    pub rt_handle: Handle,
+    rt: IORuntime,
 }
 
 impl<T> DeltaIOStorageBackend<T>
 where
     T: ObjectStore + Clone,
 {
-    pub fn new(store: T, handle: Handle) -> Self {
-        Self {
-            inner: store,
-            rt_handle: handle,
-        }
+    pub fn new(store: T, rt: IORuntime) -> Self {
+        Self { inner: store, rt }
     }
 }
 
@@ -136,7 +133,10 @@ impl<T: ObjectStore + Clone> DeltaIOStorageBackend<T> {
         O: Send + 'static,
     {
         let store = store.clone();
-        let fut = self.rt_handle.spawn(async move { f(&store, &path).await });
+        let fut = self
+            .rt
+            .get_handle()
+            .spawn(async move { f(&store, &path).await });
         fut.unwrap_or_else(|e| match e.try_into_panic() {
             Ok(p) => std::panic::resume_unwind(p),
             Err(e) => Err(ObjectStoreError::JoinError { source: e }),
@@ -160,7 +160,8 @@ impl<T: ObjectStore + Clone> DeltaIOStorageBackend<T> {
     {
         let store = store.clone();
         let fut = self
-            .rt_handle
+            .rt
+            .get_handle()
             .spawn(async move { f(&store, &from, &to).await });
         fut.unwrap_or_else(|e| match e.try_into_panic() {
             Ok(p) => std::panic::resume_unwind(p),
@@ -306,7 +307,7 @@ impl<T: ObjectStore + Clone> ObjectStore for DeltaIOStorageBackend<T> {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        options: PutMultipartOpts,
+        options: PutMultipartOptions,
     ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
         self.spawn_io_rt(
             |store, path| store.put_multipart_opts(path, options),
@@ -314,5 +315,15 @@ impl<T: ObjectStore + Clone> ObjectStore for DeltaIOStorageBackend<T> {
             location.clone(),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_ioruntime_default() {
+        let _ = IORuntime::default();
     }
 }

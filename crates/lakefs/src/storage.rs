@@ -1,16 +1,15 @@
 //! LakeFS storage backend (internally S3).
 
 use deltalake_core::logstore::object_store::aws::AmazonS3ConfigKey;
-use deltalake_core::logstore::{ObjectStoreFactory, ObjectStoreRef};
+use deltalake_core::logstore::{ObjectStoreFactory, ObjectStoreRef, StorageConfig};
 use deltalake_core::{DeltaResult, DeltaTableError, Path};
+use object_store::ObjectStoreScheme;
 use object_store::aws::AmazonS3Builder;
 use object_store::client::SpawnedReqwestConnector;
-use object_store::{ObjectStoreScheme, RetryConfig};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::runtime::Handle;
 use tracing::log::*;
 use url::Url;
 
@@ -32,12 +31,11 @@ pub(crate) trait S3StorageOptionsConversion {
             .collect();
 
         for (os_key, os_value) in std::env::vars_os() {
-            if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str()) {
-                if let Ok(config_key) = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase()) {
-                    if !options.contains_key(config_key.as_ref()) {
-                        options.insert(config_key.as_ref().to_string(), value.to_string());
-                    }
-                }
+            if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str())
+                && let Ok(config_key) = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase())
+                && !options.contains_key(config_key.as_ref())
+            {
+                options.insert(config_key.as_ref().to_string(), value.to_string());
             }
         }
 
@@ -62,17 +60,22 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
     fn parse_url_opts(
         &self,
         url: &Url,
-        storage_config: &HashMap<String, String>,
-        retry: &RetryConfig,
-        handle: Option<Handle>,
+        config: &StorageConfig,
     ) -> DeltaResult<(ObjectStoreRef, Path)> {
         // Convert LakeFS URI to equivalent S3 URI.
         let s3_url = url.to_string().replace("lakefs://", "s3://");
         let s3_url = Url::parse(&s3_url)
             .map_err(|_| DeltaTableError::InvalidTableLocation(url.clone().into()))?;
+        let mut builder = AmazonS3Builder::new().with_url(s3_url.to_string());
 
         // All S3-likes should start their builder the same way
-        let options = self.with_env_s3(storage_config);
+        let options = self.with_env_s3(&config.raw);
+        builder = builder.with_retry(config.retry.clone());
+        if let Some(runtime) = &config.runtime {
+            builder =
+                builder.with_http_connector(SpawnedReqwestConnector::new(runtime.get_handle()));
+        }
+
         let config = options
             .clone()
             .into_iter()
@@ -91,17 +94,11 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
             })?;
         let prefix = Path::parse(path)?;
 
-        let mut builder = AmazonS3Builder::new().with_url(s3_url.to_string());
-
-        if let Some(handle) = handle {
-            builder = builder.with_http_connector(SpawnedReqwestConnector::new(handle));
-        }
-
         for (key, value) in config.iter() {
             builder = builder.with_config(*key, value.clone());
         }
 
-        let store = builder.with_retry(retry.clone()).build()?;
+        let store = builder.build()?;
 
         debug!("Initialized the object store: {store:?}");
         Ok((Arc::new(store), prefix))
@@ -150,10 +147,12 @@ mod tests {
         ScopedEnv::run(|| {
             clear_env_of_lakefs_s3_keys();
             let raw_options = hashmap! {};
-            std::env::set_var("ACCESS_KEY_ID", "env_key");
-            std::env::set_var("ENDPOINT", "env_key");
-            std::env::set_var("SECRET_ACCESS_KEY", "env_key");
-            std::env::set_var("REGION", "env_key");
+            unsafe {
+                std::env::set_var("ACCESS_KEY_ID", "env_key");
+                std::env::set_var("ENDPOINT", "env_key");
+                std::env::set_var("SECRET_ACCESS_KEY", "env_key");
+                std::env::set_var("REGION", "env_key");
+            }
             let combined_options = LakeFSObjectStoreFactory {}.with_env_s3(&raw_options);
 
             // Four and then the conditional_put built-in
@@ -178,10 +177,12 @@ mod tests {
                 "SECRET_ACCESS_KEY".to_string() => "options_key".to_string(),
                 "REGION".to_string() => "options_key".to_string()
             };
-            std::env::set_var("aws_access_key_id", "env_key");
-            std::env::set_var("aws_endpoint", "env_key");
-            std::env::set_var("aws_secret_access_key", "env_key");
-            std::env::set_var("aws_region", "env_key");
+            unsafe {
+                std::env::set_var("aws_access_key_id", "env_key");
+                std::env::set_var("aws_endpoint", "env_key");
+                std::env::set_var("aws_secret_access_key", "env_key");
+                std::env::set_var("aws_region", "env_key");
+            }
 
             let combined_options = LakeFSObjectStoreFactory {}.with_env_s3(&raw_options);
 

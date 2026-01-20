@@ -7,13 +7,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use datafusion::catalog::SchemaProvider;
+use datafusion::common::DataFusionError;
 use datafusion::datasource::TableProvider;
-use datafusion_common::DataFusionError;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 
 use crate::errors::DeltaResult;
-use crate::logstore::{store_for, StorageConfig};
+use crate::logstore::{StorageConfig, store_for};
 use crate::open_table_with_storage_options;
 use crate::table::builder::ensure_table_uri;
 
@@ -59,7 +59,7 @@ impl ListingSchemaProvider {
     }
 
     /// Reload table information from ObjectStore
-    pub async fn refresh(&self) -> datafusion_common::Result<()> {
+    pub async fn refresh(&self) -> datafusion::common::Result<()> {
         let entries: Vec<_> = self.store.list(None).try_collect().await?;
         let mut tables = HashSet::new();
         for file in entries.iter() {
@@ -110,20 +110,26 @@ impl SchemaProvider for ListingSchemaProvider {
         self.tables.iter().map(|t| t.key().clone()).collect()
     }
 
-    async fn table(&self, name: &str) -> datafusion_common::Result<Option<Arc<dyn TableProvider>>> {
+    async fn table(
+        &self,
+        name: &str,
+    ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
         let Some(location) = self.tables.get(name).map(|t| t.clone()) else {
             return Ok(None);
         };
-        let provider =
-            open_table_with_storage_options(location, self.storage_options.raw.clone()).await?;
-        Ok(Some(Arc::new(provider) as Arc<dyn TableProvider>))
+        let table = open_table_with_storage_options(
+            ensure_table_uri(location)?,
+            self.storage_options.raw.clone(),
+        )
+        .await?;
+        Ok(Some(table.table_provider().await?))
     }
 
     fn register_table(
         &self,
         _name: String,
         _table: Arc<dyn TableProvider>,
-    ) -> datafusion_common::Result<Option<Arc<dyn TableProvider>>> {
+    ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
         Err(DataFusionError::Execution(
             "schema provider does not support registering tables".to_owned(),
         ))
@@ -132,7 +138,7 @@ impl SchemaProvider for ListingSchemaProvider {
     fn deregister_table(
         &self,
         _name: &str,
-    ) -> datafusion_common::Result<Option<Arc<dyn TableProvider>>> {
+    ) -> datafusion::common::Result<Option<Arc<dyn TableProvider>>> {
         Err(DataFusionError::Execution(
             "schema provider does not support deregistering tables".to_owned(),
         ))

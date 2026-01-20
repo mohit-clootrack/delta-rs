@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Optional,
     Union,
 )
 
@@ -93,11 +94,15 @@ class RawDeltaTable:
     def get_add_file_sizes(self) -> dict[str, int]: ...
     def get_latest_version(self) -> int: ...
     def metadata(self) -> RawDeltaTableMetaData: ...
-    def protocol_versions(self) -> list[Any]: ...
+    def protocol_versions(
+        self,
+    ) -> tuple[int, int, Optional[list[str]], Optional[list[str]]]: ...
+    def table_config(self) -> tuple[bool, int]: ...
     def load_version(self, version: int) -> None: ...
     def load_with_datetime(self, ds: str) -> None: ...
     def files(self, partition_filters: PartitionFilterType | None) -> list[str]: ...
     def file_uris(self, partition_filters: PartitionFilterType | None) -> list[str]: ...
+    def generate(self) -> None: ...
     def vacuum(
         self,
         dry_run: bool,
@@ -106,12 +111,15 @@ class RawDeltaTable:
         commit_properties: CommitProperties | None,
         post_commithook_properties: PostCommitHookProperties | None,
         full: bool,
+        keep_versions: list[int] | None,
     ) -> list[str]: ...
     def compact_optimize(
         self,
         partition_filters: PartitionFilterType | None,
         target_size: int | None,
         max_concurrent_tasks: int | None,
+        max_spill_size: int | None,
+        max_temp_directory_size: int | None,
         min_commit_interval: int | None,
         writer_properties: WriterProperties | None,
         commit_properties: CommitProperties | None,
@@ -124,6 +132,7 @@ class RawDeltaTable:
         target_size: int | None,
         max_concurrent_tasks: int | None,
         max_spill_size: int | None,
+        max_temp_directory_size: int | None,
         min_commit_interval: int | None,
         writer_properties: WriterProperties | None,
         commit_properties: CommitProperties | None,
@@ -275,6 +284,8 @@ class RawDeltaTable:
     ) -> None: ...
 
 def rust_core_version() -> str: ...
+def init_tracing(endpoint: Optional[str] = None) -> None: ...
+def shutdown_tracing() -> None: ...
 def create_table_with_add_actions(
     table_uri: str,
     schema: Schema,

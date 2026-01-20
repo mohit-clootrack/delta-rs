@@ -1,4 +1,6 @@
 //! This module contains helper functions to create a LazyTableProvider from an ArrowArrayStreamReader
+
+use std::any::Any;
 use std::fmt::{self};
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +11,7 @@ use deltalake::arrow::error::Result as ArrowResult;
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::datafusion::catalog::TableProvider;
 use deltalake::datafusion::physical_plan::memory::LazyBatchGenerator;
-use deltalake::operations::cast::cast_record_batch;
+use deltalake::kernel::schema::cast_record_batch;
 use parking_lot::RwLock;
 
 use crate::datafusion::LazyTableProvider;
@@ -66,6 +68,10 @@ impl ArrowStreamBatchGenerator {
 }
 
 impl LazyBatchGenerator for ArrowStreamBatchGenerator {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn generate_next_batch(
         &mut self,
     ) -> deltalake::datafusion::error::Result<Option<deltalake::arrow::array::RecordBatch>> {
@@ -78,7 +84,8 @@ impl LazyBatchGenerator for ArrowStreamBatchGenerator {
         match stream_reader.next() {
             Some(Ok(record_batch)) => Ok(Some(record_batch)),
             Some(Err(err)) => Err(deltalake::datafusion::error::DataFusionError::ArrowError(
-                err, None,
+                Box::new(err),
+                None,
             )),
             None => Ok(None), // End of stream
         }

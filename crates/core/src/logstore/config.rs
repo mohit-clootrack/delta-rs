@@ -6,13 +6,13 @@
 //!
 //! Specific pieces of configuration must implement the `TryUpdateKey` trait which
 //! defines how to update internal fields based on key-value pairs.
+#[cfg(feature = "cloud")]
+use ::object_store::RetryConfig;
+use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use std::collections::HashMap;
 
-use ::object_store::RetryConfig;
-use object_store::{path::Path, prefix::PrefixStore, ObjectStore};
-
 use super::storage::LimitConfig;
-use super::{storage::runtime::RuntimeConfig, IORuntime};
+use super::{IORuntime, storage::runtime::RuntimeConfig};
 use crate::{DeltaResult, DeltaTableError};
 
 pub trait TryUpdateKey: Default {
@@ -95,6 +95,7 @@ pub struct StorageConfig {
     /// dedicated handle.
     pub runtime: Option<IORuntime>,
 
+    #[cfg(feature = "cloud")]
     pub retry: ::object_store::RetryConfig,
 
     /// Limit configuration.
@@ -166,6 +167,7 @@ where
 
         let remainder = result.unparsed;
 
+        #[cfg(feature = "cloud")]
         let remainder = {
             let result = ParseResult::<RetryConfig>::from_iter(remainder);
             config.retry = result.config;
@@ -216,6 +218,7 @@ impl StorageConfig {
         props.limit = (!result.is_default).then_some(result.config);
         let remainder = result.unparsed;
 
+        #[cfg(feature = "cloud")]
         let remainder = {
             let (retry, remainder): (RetryConfig, _) = try_parse_impl(remainder)?;
             props.retry = retry;
@@ -259,6 +262,7 @@ pub fn parse_f64(value: &str) -> DeltaResult<f64> {
         .map_err(|_| DeltaTableError::Generic(format!("failed to parse \"{value}\" as f64")))
 }
 
+#[cfg(feature = "cloud")]
 pub fn parse_duration(value: &str) -> DeltaResult<std::time::Duration> {
     humantime::parse_duration(value)
         .map_err(|_| DeltaTableError::Generic(format!("failed to parse \"{value}\" as Duration")))
@@ -296,20 +300,21 @@ pub fn str_is_truthy(val: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maplit::hashmap;
-    use object_store::RetryConfig;
+    #[cfg(feature = "cloud")]
     use std::time::Duration;
 
     // Test retry config parsing
+    #[cfg(feature = "cloud")]
     #[test]
     fn test_retry_config_from_options() {
-        let options = hashmap! {
-            "max_retries".to_string() => "100".to_string() ,
-            "retry_timeout".to_string()  => "300s".to_string() ,
-            "backoff_config.init_backoff".to_string()  => "20s".to_string() ,
-            "backoff_config.max_backoff".to_string()  => "1h".to_string() ,
-            "backoff_config.base".to_string()  =>  "50.0".to_string() ,
-        };
+        use object_store::RetryConfig;
+        let options = HashMap::from([
+            ("max_retries".to_string(), "100".to_string()),
+            ("retry_timeout".to_string(), "300s".to_string()),
+            ("backoff_config.init_backoff".to_string(), "20s".to_string()),
+            ("backoff_config.max_backoff".to_string(), "1h".to_string()),
+            ("backoff_config.base".to_string(), "50.0".to_string()),
+        ]);
         let (retry_config, remainder): (RetryConfig, _) = super::try_parse_impl(options).unwrap();
         assert!(remainder.is_empty());
 
@@ -321,16 +326,18 @@ mod tests {
     }
 
     // Test ParseResult functionality
+    #[cfg(feature = "cloud")]
     #[test]
     fn test_parse_result_handling() {
-        let options = hashmap! {
-            "retry_timeout".to_string() => "300s".to_string(),
-            "max_retries".to_string() => "not_a_number".to_string(),
-            "unknown_key".to_string() => "value".to_string(),
-        };
+        use object_store::RetryConfig;
+        let options = HashMap::from([
+            ("retry_timeout".to_string(), "300s".to_string()),
+            ("max_retries".to_string(), "not_a_number".to_string()),
+            ("unknown_key".to_string(), "value".to_string()),
+        ]);
 
         let result: ParseResult<RetryConfig> = options.into_iter().collect();
-        println!("result: {:?}", result);
+        println!("result: {result:?}");
         assert!(!result.errors.is_empty());
         assert!(!result.unparsed.is_empty());
         assert!(!result.is_default);
@@ -339,13 +346,14 @@ mod tests {
     }
 
     // Test StorageConfig parsing
+    #[cfg(feature = "cloud")]
     #[test]
     fn test_storage_config_parsing() {
-        let options = hashmap! {
-            "max_retries".to_string() => "5".to_string(),
-            "retry_timeout".to_string() => "10s".to_string(),
-            "unknown_prop".to_string() => "value".to_string(),
-        };
+        let options = HashMap::from([
+            ("max_retries".to_string(), "5".to_string()),
+            ("retry_timeout".to_string(), "10s".to_string()),
+            ("unknown_prop".to_string(), "value".to_string()),
+        ]);
 
         let config = StorageConfig::parse_options(options).unwrap();
         assert_eq!(config.retry.max_retries, 5);
@@ -363,15 +371,19 @@ mod tests {
         assert_eq!(parse_f64("3.14").unwrap(), 3.14);
         assert!(parse_f64("not_a_number").is_err());
 
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-        assert!(parse_duration("invalid").is_err());
-
         assert!(parse_bool("true").unwrap());
         assert!(parse_bool("1").unwrap());
         assert!(!parse_bool("false").unwrap());
         assert!(!parse_bool("0").unwrap());
 
         assert_eq!(parse_string("test").unwrap(), "test");
+    }
+
+    #[cfg(feature = "cloud")]
+    #[test]
+    fn test_parsing_duration() {
+        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        assert!(parse_duration("invalid").is_err());
     }
 
     // Test str_is_truthy function
@@ -381,11 +393,11 @@ mod tests {
         let falsy_values = ["0", "false", "off", "NO", "n", "bork", "False", "OFF"];
 
         for value in truthy_values {
-            assert!(str_is_truthy(value), "{} should be truthy", value);
+            assert!(str_is_truthy(value), "{value} should be truthy");
         }
 
         for value in falsy_values {
-            assert!(!str_is_truthy(value), "{} should be falsy", value);
+            assert!(!str_is_truthy(value), "{value} should be falsy");
         }
     }
 

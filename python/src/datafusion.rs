@@ -2,22 +2,24 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use arrow_schema::Schema as ArrowSchema;
-use datafusion_expr::utils::conjunction;
-use datafusion_physical_expr::execution_props::ExecutionProps;
-use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
-use datafusion_physical_plan::filter::FilterExec;
-use datafusion_physical_plan::limit::GlobalLimitExec;
-use datafusion_physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
-use datafusion_physical_plan::projection::ProjectionExec;
-use datafusion_physical_plan::{ExecutionPlan, Statistics};
+use arrow_schema::{Schema as ArrowSchema, SchemaRef};
+use datafusion::logical_expr::utils::conjunction;
+use datafusion::physical_expr::execution_props::ExecutionProps;
+use datafusion::physical_expr::{create_physical_expr, PhysicalExpr};
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::limit::GlobalLimitExec;
+use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::{ExecutionPlan, Statistics};
 use deltalake::datafusion::catalog::{Session, TableProvider};
 use deltalake::datafusion::common::{Column, DFSchema, Result as DataFusionResult};
 use deltalake::datafusion::datasource::TableType;
 use deltalake::datafusion::logical_expr::{LogicalPlan, TableProviderFilterPushDown};
 use deltalake::datafusion::prelude::Expr;
-use deltalake::{DeltaResult, DeltaTableError};
+use deltalake::delta_datafusion::DeltaScanNext;
+use deltalake::{datafusion, DeltaResult, DeltaTableError};
 use parking_lot::RwLock;
+use tokio::runtime::Handle;
 
 #[derive(Debug)]
 pub(crate) struct LazyTableProvider {
@@ -117,6 +119,61 @@ impl TableProvider for LazyTableProvider {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct TokioDeltaScan {
+    inner: DeltaScanNext,
+    handle: Handle,
+}
+
+impl TokioDeltaScan {
+    pub fn new(inner: DeltaScanNext, handle: Handle) -> Self {
+        Self { inner, handle }
+    }
+}
+
+#[async_trait::async_trait]
+impl TableProvider for TokioDeltaScan {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+
+    fn table_type(&self) -> TableType {
+        self.inner.table_type()
+    }
+
+    fn get_table_definition(&self) -> Option<&str> {
+        self.inner.get_table_definition()
+    }
+
+    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
+        self.inner.get_logical_plan()
+    }
+
+    async fn scan(
+        &self,
+        session: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let inner = &self.inner;
+
+        self.handle
+            .block_on(async { inner.scan(session, projection, filters, limit).await })
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filter: &[&Expr],
+    ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
+        self.inner.supports_filters_pushdown(filter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,8 +181,8 @@ mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-    use datafusion_expr::{col, lit};
-    use datafusion_physical_plan::memory::LazyBatchGenerator;
+    use datafusion::logical_expr::{col, lit};
+    use datafusion::physical_plan::memory::LazyBatchGenerator;
     use deltalake::arrow::array::{Int32Array, StringArray};
     use deltalake::arrow::record_batch::RecordBatch;
     use deltalake::datafusion::common::Result as DataFusionResult;
@@ -138,7 +195,6 @@ mod tests {
     // A dummy LazyBatchGenerator implementation for testing
     #[derive(Debug)]
     struct TestBatchGenerator {
-        schema: Arc<ArrowSchema>,
         data: Vec<RecordBatch>,
         current_index: usize,
     }
@@ -150,9 +206,8 @@ mod tests {
     }
 
     impl TestBatchGenerator {
-        fn new(schema: Arc<ArrowSchema>, data: Vec<RecordBatch>) -> Self {
+        fn new(data: Vec<RecordBatch>) -> Self {
             Self {
-                schema,
                 data,
                 current_index: 0,
             }
@@ -164,17 +219,19 @@ mod tests {
             let id_array = Int32Array::from(vec![1, 2, 3, 4, 5]);
             let name_array = StringArray::from(vec!["Alice", "Bob", "Carol", "Dave", "Eve"]);
 
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(id_array), Arc::new(name_array)],
-            )
-            .unwrap();
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(name_array)])
+                    .unwrap();
 
-            Arc::new(RwLock::new(TestBatchGenerator::new(schema, vec![batch])))
+            Arc::new(RwLock::new(TestBatchGenerator::new(vec![batch])))
         }
     }
 
     impl LazyBatchGenerator for TestBatchGenerator {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
         fn generate_next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
             if self.current_index < self.data.len() {
                 let batch = self.data[self.current_index].clone();
@@ -268,7 +325,7 @@ mod tests {
 
         // The scan method should add a FilterExec to the plan
         // We can verify this by checking the plan's children
-        assert!(plan.children().len() > 0);
+        assert!(!plan.children().is_empty());
     }
 
     #[tokio::test]
@@ -295,10 +352,7 @@ mod tests {
 
         // The plan should include a LimitExec
         // We can verify this by checking that the plan type is correct
-        assert!(plan
-            .as_any()
-            .downcast_ref::<datafusion_physical_plan::limit::GlobalLimitExec>()
-            .is_some());
+        assert!(plan.as_any().downcast_ref::<GlobalLimitExec>().is_some());
     }
 
     #[tokio::test]
@@ -335,9 +389,6 @@ mod tests {
 
         // The resulting plan should have a chain of operations:
         // GlobalLimitExec -> ProjectionExec -> FilterExec -> LazyMemoryExec
-        assert!(plan
-            .as_any()
-            .downcast_ref::<datafusion_physical_plan::limit::GlobalLimitExec>()
-            .is_some());
+        assert!(plan.as_any().downcast_ref::<GlobalLimitExec>().is_some());
     }
 }
