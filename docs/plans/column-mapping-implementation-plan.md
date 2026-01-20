@@ -56,13 +56,17 @@ Implement full support for Delta Lake column mapping mode (`name` and `id`) in d
 - [ ] Update `resolve_column_count_stat()` similarly
 - [ ] Update `stats_as_batch()` to use column mapping
 
-### Phase 5: Write Support
-- [ ] Update `crates/core/src/operations/write/writer.rs`:
-  - Use physical names for Parquet column names when writing
-  - Use physical names in partition paths/values
-- [ ] Update partition value generation to use physical names in `Add` actions
-- [ ] Update statistics generation to use physical names
-- [ ] Handle protocol requirements (reader v2, writer v5 for column mapping)
+### Phase 5: Write Support (Future Work)
+> **Note:** Write support requires significant changes and is currently disabled.
+> The `ColumnMapping` feature is commented out in `protocol.rs` ProtocolChecker.
+
+- [ ] Enable `TableFeature::ColumnMapping` in `kernel/transaction/protocol.rs`
+- [ ] Update `WriterConfig` to accept column mapping mode
+- [ ] Transform Arrow schema fields to physical names before writing Parquet:
+  - Add `file_schema_physical()` method using `make_physical()` from delta_kernel
+- [ ] Transform partition values to physical names in `Add` actions:
+  - Modify `create_add()` in `writer/stats.rs`
+- [ ] Verify statistics are correct (should already work since stats come from Parquet)
 
 ### Phase 6: Python Bindings
 - [ ] Add `column_mapping_mode()` method to `RawDeltaTable` in `python/src/lib.rs`

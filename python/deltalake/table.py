@@ -58,8 +58,8 @@ NOT_SUPPORTED_PYARROW_WRITER_VERSIONS = [3, 4, 5, 6]
 SUPPORTED_WRITER_FEATURES = {"appendOnly", "invariants", "timestampNtz"}
 
 MAX_SUPPORTED_READER_VERSION = 3
-NOT_SUPPORTED_READER_VERSION = 2
-SUPPORTED_READER_FEATURES = {"timestampNtz"}
+NOT_SUPPORTED_READER_VERSION = -1  # No longer blocking version 2 (column mapping)
+SUPPORTED_READER_FEATURES = {"timestampNtz", "columnMapping"}
 
 FSCK_METRICS_FILES_REMOVED_LABEL = "files_removed"
 
@@ -859,14 +859,8 @@ class DeltaTable:
                     "but these are not yet supported by the deltalake reader."
                 )
 
-        if (
-            table_protocol.reader_features
-            and "columnMapping" in table_protocol.reader_features
-        ):
-            raise DeltaProtocolError(
-                "The table requires reader feature 'columnMapping' "
-                "but this is not supported using pyarrow Datasets."
-            )
+        # Column mapping is now supported through the new scan implementation
+        # which properly handles physical-to-logical column name mapping
 
         if (
             table_protocol.reader_features
