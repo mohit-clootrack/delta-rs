@@ -70,6 +70,102 @@ FilterType = Union[FilterConjunctionType, FilterDNFType]
 PartitionFilterType = list[tuple[str, str, Union[str, list[str]]]]
 
 
+class _ColumnMappingDataset:
+    """
+    A wrapper around PyArrow Dataset that renames columns from physical to logical names.
+
+    This is used when reading Delta tables with column mapping enabled, where the parquet
+    files contain physical column names (like 'col-xxx-xxx') but we want to expose the
+    logical column names (like 'user name') to the user.
+    """
+
+    def __init__(
+        self,
+        base_dataset: "pyarrow.dataset.Dataset",
+        physical_to_logical: dict[str, str],
+        logical_schema: "pyarrow.Schema",
+    ) -> None:
+        self._base_dataset = base_dataset
+        self._physical_to_logical = physical_to_logical
+        self._logical_schema = logical_schema
+
+    @property
+    def schema(self) -> "pyarrow.Schema":
+        """Return the logical schema with user-friendly column names."""
+        return self._logical_schema
+
+    def to_table(
+        self,
+        columns: list[str] | None = None,
+        filter: "pyarrow.dataset.Expression | None" = None,
+        **kwargs: Any,
+    ) -> "pyarrow.Table":
+        """Read the dataset to a PyArrow Table, translating column names."""
+        # Translate logical column names to physical column names for reading
+        physical_columns = None
+        if columns is not None:
+            logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
+            physical_columns = [
+                logical_to_physical.get(col, col) for col in columns
+            ]
+
+        # Read with physical column names
+        table = self._base_dataset.to_table(
+            columns=physical_columns,
+            filter=filter,
+            **kwargs,
+        )
+
+        # Rename columns from physical to logical
+        new_column_names = [
+            self._physical_to_logical.get(name, name) for name in table.column_names
+        ]
+        table = table.rename_columns(new_column_names)
+
+        # If specific columns were requested, preserve the order
+        if columns is not None:
+            table = table.select(columns)
+
+        return table
+
+    def to_batches(
+        self,
+        columns: list[str] | None = None,
+        filter: "pyarrow.dataset.Expression | None" = None,
+        **kwargs: Any,
+    ) -> Generator["pyarrow.RecordBatch", None, None]:
+        """Read the dataset as batches, translating column names."""
+        # Translate logical column names to physical column names for reading
+        physical_columns = None
+        if columns is not None:
+            logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
+            physical_columns = [
+                logical_to_physical.get(col, col) for col in columns
+            ]
+
+        # Read batches with physical column names and rename
+        for batch in self._base_dataset.to_batches(
+            columns=physical_columns,
+            filter=filter,
+            **kwargs,
+        ):
+            # Rename columns in the batch
+            new_column_names = [
+                self._physical_to_logical.get(name, name) for name in batch.schema.names
+            ]
+            # Create a new schema with logical names
+            new_schema = batch.schema.with_names(new_column_names)
+            yield batch.cast(new_schema)
+
+    @property
+    def files(self) -> list[str]:
+        """Return the list of files in the dataset."""
+        return self._base_dataset.files
+
+    def __repr__(self) -> str:
+        return f"_ColumnMappingDataset({self._base_dataset!r})"
+
+
 @dataclass(init=False)
 class Metadata:
     """Create a Metadata instance."""
@@ -859,9 +955,6 @@ class DeltaTable:
                     "but these are not yet supported by the deltalake reader."
                 )
 
-        # Column mapping is now supported through the new scan implementation
-        # which properly handles physical-to-logical column name mapping
-
         if (
             table_protocol.reader_features
             and "deletionVectors" in table_protocol.reader_features
@@ -890,10 +983,28 @@ class DeltaTable:
             default_fragment_scan_options=ParquetFragmentScanOptions(pre_buffer=True),
         )
 
+        # Get column mapping info from Rust
+        physical_to_logical = self._table.get_physical_to_logical_column_mapping()
+        use_column_mapping = len(physical_to_logical) > 0
+
         if schema is None:
             schema = pyarrow.schema(
                 self.schema().to_arrow(as_large_types=as_large_types)
             )
+
+        # For column mapping, build physical schema for reading parquet files
+        if use_column_mapping:
+            logical_to_physical = {v: k for k, v in physical_to_logical.items()}
+            physical_fields = []
+            for field in schema:
+                physical_name = logical_to_physical.get(field.name, field.name)
+                physical_field = pyarrow.field(
+                    physical_name, field.type, field.nullable, field.metadata
+                )
+                physical_fields.append(physical_field)
+            physical_schema = pyarrow.schema(physical_fields)
+        else:
+            physical_schema = schema
 
         partitions = self._stringify_partition_values(partitions)
 
@@ -910,14 +1021,20 @@ class DeltaTable:
 
         dictionary_columns = format.read_options.dictionary_columns or set()
         if dictionary_columns:
-            for index, field in enumerate(schema):
+            for index, field in enumerate(physical_schema):
                 if field.name in dictionary_columns:
                     dict_field = field.with_type(
                         pyarrow.dictionary(pyarrow.int32(), field.type)
                     )
-                    schema = schema.set(index, dict_field)
+                    physical_schema = physical_schema.set(index, dict_field)
 
-        return FileSystemDataset(fragments, schema, format, filesystem)
+        base_dataset = FileSystemDataset(fragments, physical_schema, format, filesystem)
+
+        # If column mapping is enabled, wrap the dataset to rename columns
+        if use_column_mapping:
+            return _ColumnMappingDataset(base_dataset, physical_to_logical, schema)
+
+        return base_dataset
 
     def to_pyarrow_table(
         self,
