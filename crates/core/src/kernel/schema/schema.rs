@@ -1,6 +1,7 @@
 //! Delta table schema
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use delta_kernel::schema::{
@@ -8,6 +9,7 @@ pub use delta_kernel::schema::{
     StructField, StructType,
 };
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::kernel::error::Error;
 use crate::schema::DataCheck;
@@ -58,6 +60,15 @@ pub trait StructTypeExt {
 
     /// Get all generated column expressions
     fn get_generated_columns(&self) -> Result<Vec<GeneratedColumn>, Error>;
+
+    /// Add column mapping metadata to all fields in the schema.
+    /// This generates unique physical names (UUIDs) and assigns sequential column IDs.
+    /// Returns a new schema with column mapping metadata added to all fields.
+    fn with_column_mapping_metadata(&self) -> Result<StructType, Error>;
+
+    /// Build a mapping from logical column names to physical column names
+    /// based on the column mapping metadata in this schema.
+    fn get_logical_to_physical_mapping(&self) -> HashMap<String, String>;
 }
 
 impl StructTypeExt for StructType {
@@ -153,6 +164,134 @@ impl StructTypeExt for StructType {
             }
         }
         Ok(invariants)
+    }
+
+    /// Add column mapping metadata to all fields in the schema.
+    /// This generates unique physical names (UUIDs) and assigns sequential column IDs.
+    fn with_column_mapping_metadata(&self) -> Result<StructType, Error> {
+        let mut column_id_counter = 1i64;
+
+        fn add_metadata_to_field(
+            field: &StructField,
+            counter: &mut i64,
+        ) -> Result<StructField, Error> {
+            // Generate physical name and column ID
+            let physical_name = format!("col-{}", Uuid::new_v4());
+            let column_id = *counter;
+            *counter += 1;
+
+            // Build new metadata with column mapping info
+            let mut metadata: Vec<(String, MetadataValue)> = field
+                .metadata()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            metadata.push((
+                "delta.columnMapping.id".to_string(),
+                MetadataValue::Number(column_id),
+            ));
+            metadata.push((
+                "delta.columnMapping.physicalName".to_string(),
+                MetadataValue::String(physical_name),
+            ));
+
+            // Handle nested types recursively
+            let new_data_type = match field.data_type() {
+                DataType::Struct(inner) => {
+                    let new_fields: Result<Vec<StructField>, Error> = inner
+                        .fields()
+                        .map(|f| add_metadata_to_field(f, counter))
+                        .collect();
+                    DataType::Struct(Box::new(
+                        StructType::try_new(new_fields?).map_err(|e| Error::Generic(e.to_string()))?,
+                    ))
+                }
+                DataType::Array(inner) => {
+                    // For arrays, the element type might need metadata if it's a struct
+                    if let DataType::Struct(elem_struct) = inner.element_type() {
+                        let new_fields: Result<Vec<StructField>, Error> = elem_struct
+                            .fields()
+                            .map(|f| add_metadata_to_field(f, counter))
+                            .collect();
+                        DataType::Array(Box::new(ArrayType::new(
+                            DataType::Struct(Box::new(
+                                StructType::try_new(new_fields?)
+                                    .map_err(|e| Error::Generic(e.to_string()))?,
+                            )),
+                            inner.contains_null(),
+                        )))
+                    } else {
+                        field.data_type().clone()
+                    }
+                }
+                DataType::Map(inner) => {
+                    // For maps, value type might need metadata if it's a struct
+                    let new_key_type = inner.key_type().clone();
+                    let new_value_type = if let DataType::Struct(val_struct) = inner.value_type() {
+                        let new_fields: Result<Vec<StructField>, Error> = val_struct
+                            .fields()
+                            .map(|f| add_metadata_to_field(f, counter))
+                            .collect();
+                        DataType::Struct(Box::new(
+                            StructType::try_new(new_fields?)
+                                .map_err(|e| Error::Generic(e.to_string()))?,
+                        ))
+                    } else {
+                        inner.value_type().clone()
+                    };
+                    DataType::Map(Box::new(MapType::new(
+                        new_key_type,
+                        new_value_type,
+                        inner.value_contains_null(),
+                    )))
+                }
+                _ => field.data_type().clone(),
+            };
+
+            // Create new field with updated data type and metadata
+            let new_field = if field.is_nullable() {
+                StructField::nullable(field.name(), new_data_type)
+            } else {
+                StructField::not_null(field.name(), new_data_type)
+            };
+
+            Ok(new_field.with_metadata(metadata))
+        }
+
+        let new_fields: Result<Vec<StructField>, Error> = self
+            .fields()
+            .map(|f| add_metadata_to_field(f, &mut column_id_counter))
+            .collect();
+
+        StructType::try_new(new_fields?).map_err(|e| Error::Generic(e.to_string()))
+    }
+
+    /// Build a mapping from logical column names to physical column names
+    fn get_logical_to_physical_mapping(&self) -> HashMap<String, String> {
+        fn collect_mappings(schema: &StructType, result: &mut HashMap<String, String>) {
+            for field in schema.fields() {
+                let logical_name = field.name().to_string();
+
+                // Get physical name from metadata if present
+                if let Some(MetadataValue::String(physical_name)) =
+                    field.metadata().get("delta.columnMapping.physicalName")
+                {
+                    if &logical_name != physical_name {
+                        result.insert(logical_name.clone(), physical_name.clone());
+                    }
+                }
+
+                // Recursively handle nested structs
+                if let DataType::Struct(nested) = field.data_type() {
+                    collect_mappings(nested.as_ref(), result);
+                }
+            }
+        }
+
+        let mut mappings = HashMap::new();
+        collect_mappings(self, &mut mappings);
+        mappings
     }
 }
 

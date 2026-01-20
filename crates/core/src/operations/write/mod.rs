@@ -47,7 +47,7 @@ use tracing::Instrument;
 use url::Url;
 
 pub use self::configs::WriterStatsConfig;
-use self::execution::{prepare_predicate_actions, write_execution_plan_v2};
+use self::execution::{prepare_predicate_actions, write_execution_plan_v2, write_execution_plan_v3};
 use self::generated_columns::{gc_is_enabled, with_generated_columns};
 use self::metrics::{SOURCE_COUNT_ID, SOURCE_COUNT_METRIC};
 use self::schema_evolution::try_cast_schema;
@@ -686,8 +686,31 @@ impl std::future::IntoFuture for WriteBuilder {
 
                 let source_plan = session.create_physical_plan(&source).await?;
 
+                // Extract schema with column mapping metadata if creating a new table
+                // with column mapping enabled
+                let target_schema_with_column_mapping: Option<StructType> =
+                    if this.snapshot.is_none() {
+                        // For new tables, check if there's a Metadata action with schema
+                        actions
+                            .iter()
+                            .find_map(|a| {
+                                if let Action::Metadata(m) = a {
+                                    // Parse the schema and check if it has column mapping metadata
+                                    m.parse_schema().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .filter(|schema| {
+                                // Only use if schema has column mapping metadata
+                                !schema.get_logical_to_physical_mapping().is_empty()
+                            })
+                    } else {
+                        None
+                    };
+
                 // Here we need to validate if the new data conforms to a predicate if one is provided
-                let (add_actions, _) = write_execution_plan_v2(
+                let (add_actions, _) = write_execution_plan_v3(
                     this.snapshot.as_ref(),
                     session.as_ref(),
                     source_plan.clone(),
@@ -699,6 +722,7 @@ impl std::future::IntoFuture for WriteBuilder {
                     writer_stats_config.clone(),
                     predicate.clone(),
                     contains_cdc,
+                    target_schema_with_column_mapping.as_ref(),
                 )
                 .await?;
 

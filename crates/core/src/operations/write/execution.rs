@@ -314,6 +314,40 @@ pub(crate) async fn write_execution_plan_v2(
     predicate: Option<Expr>,
     contains_cdc: bool,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    write_execution_plan_v3(
+        snapshot,
+        session,
+        plan,
+        partition_columns,
+        object_store,
+        target_file_size,
+        write_batch_size,
+        writer_properties,
+        writer_stats_config,
+        predicate,
+        contains_cdc,
+        None, // No target schema for column mapping - use snapshot or default
+    )
+    .await
+}
+
+/// Version 3 of write_execution_plan that supports column mapping for new tables
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_execution_plan_v3(
+    snapshot: Option<&EagerSnapshot>,
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+    predicate: Option<Expr>,
+    contains_cdc: bool,
+    // Optional target schema with column mapping metadata for new tables
+    target_schema_with_column_mapping: Option<&StructType>,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     // We always take the plan Schema since the data may contain Large/View arrow types,
     // the schema and batches were prior constructed with this in mind.
     let schema = plan.schema();
@@ -342,6 +376,14 @@ pub(crate) async fn write_execution_plan_v2(
         let mode = snapshot.table_configuration().column_mapping_mode();
         let mapping = build_logical_to_physical_mapping(&snapshot.schema(), mode);
         (mode, mapping)
+    } else if let Some(target_schema) = target_schema_with_column_mapping {
+        // For new tables with column mapping, extract mapping from target schema metadata
+        let mapping = target_schema.get_logical_to_physical_mapping();
+        if mapping.is_empty() {
+            (ColumnMappingMode::None, HashMap::new())
+        } else {
+            (ColumnMappingMode::Name, mapping)
+        }
     } else {
         (ColumnMappingMode::None, HashMap::new())
     };
