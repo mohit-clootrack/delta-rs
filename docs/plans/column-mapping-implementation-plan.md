@@ -18,11 +18,11 @@ Implement full support for Delta Lake column mapping mode (`name` and `id`) in d
 ## Implementation Checklist
 
 ### Phase 0: Setup
-- [ ] Add upstream remote: `git remote add upstream https://github.com/delta-io/delta-rs.git`
-- [ ] Fetch latest from upstream: `git fetch upstream`
-- [ ] Merge upstream main into working branch
-- [ ] Resolve any merge conflicts
-- [ ] Verify build works: `cargo build -p deltalake-core`
+- [x] Add upstream remote: `git remote add upstream https://github.com/delta-io/delta-rs.git`
+- [x] Fetch latest from upstream: `git fetch upstream`
+- [x] Merge upstream main into working branch
+- [x] Resolve any merge conflicts
+- [x] Verify build works: `cargo build -p deltalake-core`
 
 ### Phase 1: Core Infrastructure
 - [ ] Create `crates/core/src/kernel/column_mapping.rs` with `ColumnMappingResolver` struct
