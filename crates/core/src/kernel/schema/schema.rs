@@ -69,6 +69,10 @@ pub trait StructTypeExt {
     /// Build a mapping from logical column names to physical column names
     /// based on the column mapping metadata in this schema.
     fn get_logical_to_physical_mapping(&self) -> HashMap<String, String>;
+
+    /// Build a mapping from logical column names to column IDs
+    /// based on the column mapping metadata in this schema.
+    fn get_logical_to_id_mapping(&self) -> HashMap<String, i32>;
 }
 
 impl StructTypeExt for StructType {
@@ -280,6 +284,31 @@ impl StructTypeExt for StructType {
                     if &logical_name != physical_name {
                         result.insert(logical_name.clone(), physical_name.clone());
                     }
+                }
+
+                // Recursively handle nested structs
+                if let DataType::Struct(nested) = field.data_type() {
+                    collect_mappings(nested.as_ref(), result);
+                }
+            }
+        }
+
+        let mut mappings = HashMap::new();
+        collect_mappings(self, &mut mappings);
+        mappings
+    }
+
+    /// Build a mapping from logical column names to column IDs
+    fn get_logical_to_id_mapping(&self) -> HashMap<String, i32> {
+        fn collect_mappings(schema: &StructType, result: &mut HashMap<String, i32>) {
+            for field in schema.fields() {
+                let logical_name = field.name().to_string();
+
+                // Get column ID from metadata if present
+                if let Some(MetadataValue::Number(id)) =
+                    field.metadata().get("delta.columnMapping.id")
+                {
+                    result.insert(logical_name.clone(), *id as i32);
                 }
 
                 // Recursively handle nested structs
