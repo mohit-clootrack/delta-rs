@@ -199,6 +199,37 @@ async fn test_physical_name_access() -> TestResult {
     Ok(())
 }
 
+/// Test selecting only partition column (metadata-only scan with partition values)
+#[tokio::test]
+async fn test_partition_column_only_with_column_mapping() -> TestResult {
+    let table_path = "../test/tests/data/table_with_column_mapping";
+
+    let table = open_table(test_table_uri(table_path)).await?;
+    let provider = table.table_provider().await?;
+
+    let ctx = create_session().into_inner();
+    ctx.register_table("test_table", provider)?;
+
+    // Select only partition column - this is a metadata-only scan
+    let df = ctx
+        .sql(r#"SELECT DISTINCT "Company Very Short" FROM test_table ORDER BY "Company Very Short""#)
+        .await?;
+
+    let batches = df.collect().await?;
+
+    let expected = vec![
+        "+--------------------+",
+        "| Company Very Short |",
+        "+--------------------+",
+        "| BME                |",
+        "| BMS                |",
+        "+--------------------+",
+    ];
+    assert_batches_sorted_eq!(&expected, &batches);
+
+    Ok(())
+}
+
 /// Test end-to-end: read full table content
 #[tokio::test]
 async fn test_full_table_scan_with_column_mapping() -> TestResult {
@@ -433,11 +464,7 @@ async fn test_stats_use_physical_names() -> TestResult {
 }
 
 /// Test full end-to-end: read, append, read back
-/// Note: This test is ignored because there's a pre-existing issue with reading back
-/// newly written data in tables with column mapping. The write implementation works
-/// correctly as verified by other tests.
 #[tokio::test]
-#[ignore = "Pre-existing issue with reading back written data in column mapping tables"]
 async fn test_full_roundtrip_with_column_mapping() -> TestResult {
     // Create a temp directory and copy the test table
     let tmp_dir = tempfile::tempdir()?;
@@ -449,7 +476,7 @@ async fn test_full_roundtrip_with_column_mapping() -> TestResult {
 
     // Open the copied table
     let table_uri = test_table_uri(table_path.to_str().unwrap());
-    let mut table = open_table(table_uri.clone()).await?;
+    let table = open_table(table_uri.clone()).await?;
 
     // Read initial data
     let provider = table.table_provider().await?;
@@ -479,7 +506,7 @@ async fn test_full_roundtrip_with_column_mapping() -> TestResult {
         ],
     )?;
 
-    table = WriteBuilder::new(
+    let _ = WriteBuilder::new(
         table.log_store(),
         table.snapshot().ok().map(|s| s.snapshot()).cloned(),
     )

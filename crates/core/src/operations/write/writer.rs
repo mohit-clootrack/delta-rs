@@ -375,7 +375,25 @@ impl DeltaWriter {
         record_batch: RecordBatch,
         partition_values: &IndexMap<String, Scalar>,
     ) -> DeltaResult<()> {
-        let partition_key = Path::parse(partition_values.hive_partition_path())?;
+        // Convert partition values to physical names for the partition key when column mapping is enabled
+        let physical_partition_values: IndexMap<String, Scalar> =
+            if !self.config.logical_to_physical.is_empty() {
+                partition_values
+                    .iter()
+                    .map(|(k, v)| {
+                        let physical_key = self
+                            .config
+                            .logical_to_physical
+                            .get(k)
+                            .cloned()
+                            .unwrap_or_else(|| k.clone());
+                        (physical_key, v.clone())
+                    })
+                    .collect()
+            } else {
+                partition_values.clone()
+            };
+        let partition_key = Path::parse(physical_partition_values.hive_partition_path())?;
 
         let record_batch =
             record_batch_without_partitions(&record_batch, &self.config.partition_columns)?;
@@ -525,7 +543,8 @@ impl PartitionWriterConfig {
 
     /// Enable column mapping with the specified mappings.
     ///
-    /// This transforms the file schema to use physical column names and adds parquet field IDs.
+    /// This transforms the file schema to use physical column names, adds parquet field IDs,
+    /// and updates the partition path prefix to use physical column names.
     pub fn with_column_mapping(
         mut self,
         logical_to_physical: HashMap<String, String>,
@@ -534,6 +553,27 @@ impl PartitionWriterConfig {
         // Transform file schema to use physical column names and add parquet field IDs
         self.file_schema =
             transform_schema_to_physical(&self.file_schema, &logical_to_physical, &logical_to_id);
+
+        // Update partition path prefix to use physical column names
+        // This is necessary because partition paths on disk must use physical names
+        // when column mapping is enabled
+        if !logical_to_physical.is_empty() {
+            let physical_partition_values: IndexMap<String, Scalar> = self
+                .partition_values
+                .iter()
+                .map(|(k, v)| {
+                    let physical_key = logical_to_physical
+                        .get(k)
+                        .cloned()
+                        .unwrap_or_else(|| k.clone());
+                    (physical_key, v.clone())
+                })
+                .collect();
+            if let Ok(new_prefix) = Path::parse(physical_partition_values.hive_partition_path()) {
+                self.prefix = new_prefix;
+            }
+        }
+
         self.logical_to_physical = logical_to_physical;
         self.logical_to_id = logical_to_id;
         self
