@@ -280,10 +280,9 @@ impl StructTypeExt for StructType {
                 // Get physical name from metadata if present
                 if let Some(MetadataValue::String(physical_name)) =
                     field.metadata().get("delta.columnMapping.physicalName")
+                    && &logical_name != physical_name
                 {
-                    if &logical_name != physical_name {
-                        result.insert(logical_name.clone(), physical_name.clone());
-                    }
+                    result.insert(logical_name.clone(), physical_name.clone());
                 }
 
                 // Recursively handle nested structs
