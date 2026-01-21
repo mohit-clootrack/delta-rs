@@ -159,6 +159,25 @@ class _ColumnMappingDataset:
         """Return the list of files in the dataset."""
         return self._base_dataset.files
 
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unsupported methods to the base dataset with a warning.
+
+        This wrapper only fully supports: to_table(), to_batches(), schema, files.
+        Other Dataset methods are delegated but may not handle column name translation.
+        """
+        import warnings
+
+        attr = getattr(self._base_dataset, name)
+        if callable(attr):
+            warnings.warn(
+                f"Method '{name}' is not fully supported by _ColumnMappingDataset. "
+                f"Column names may appear as physical names (col-xxx) instead of logical names. "
+                f"Use to_table() or to_batches() for full column mapping support.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return attr
+
     def __repr__(self) -> str:
         return f"_ColumnMappingDataset({self._base_dataset!r})"
 

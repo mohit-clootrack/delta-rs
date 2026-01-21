@@ -297,6 +297,10 @@ pub(crate) async fn write_execution_plan_v2(
 }
 
 /// Version 3 of write_execution_plan that supports column mapping for new tables
+///
+/// TODO: Consider refactoring to use a `WriteOptions` struct to group related parameters
+/// (target_file_size, write_batch_size, writer_properties, writer_stats_config) and reduce
+/// the number of function arguments.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_execution_plan_v3(
     snapshot: Option<&EagerSnapshot>,

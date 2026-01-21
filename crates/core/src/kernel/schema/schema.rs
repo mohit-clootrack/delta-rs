@@ -450,4 +450,187 @@ mod tests {
         let buf = r#"{"type":"struct","fields":[{"name":"ID_D_DATE","type":"long","nullable":true,"metadata":{"delta.identity.start":1,"delta.identity.step":1,"delta.identity.allowExplicitInsert":false}},{"name":"TXT_DateKey","type":"string","nullable":true,"metadata":{}}]}"#;
         let _schema: StructType = serde_json::from_str(buf).expect("Failed to load");
     }
+
+    #[test]
+    fn test_column_mapping_metadata_flat_schema() {
+        // Test adding column mapping metadata to a flat schema
+        let schema: StructType = serde_json::from_value(json!({
+            "type": "struct",
+            "fields": [
+                {"name": "id", "type": "integer", "nullable": false, "metadata": {}},
+                {"name": "name", "type": "string", "nullable": true, "metadata": {}}
+            ]
+        }))
+        .unwrap();
+
+        let mapped_schema = schema.with_column_mapping_metadata().unwrap();
+
+        // Verify each field has column mapping metadata
+        for (i, field) in mapped_schema.fields().enumerate() {
+            let metadata = field.metadata();
+            assert!(
+                metadata.contains_key(COLUMN_MAPPING_ID_KEY),
+                "Field {} missing column ID",
+                field.name()
+            );
+            assert!(
+                metadata.contains_key(COLUMN_MAPPING_PHYSICAL_NAME_KEY),
+                "Field {} missing physical name",
+                field.name()
+            );
+
+            // Column IDs should start at 1 and increment
+            if let Some(MetadataValue::Number(id)) = metadata.get(COLUMN_MAPPING_ID_KEY) {
+                assert_eq!(*id, (i + 1) as i64);
+            }
+
+            // Physical names should start with "col-"
+            if let Some(MetadataValue::String(physical)) =
+                metadata.get(COLUMN_MAPPING_PHYSICAL_NAME_KEY)
+            {
+                assert!(physical.starts_with("col-"), "Physical name should start with 'col-'");
+            }
+        }
+    }
+
+    #[test]
+    fn test_column_mapping_metadata_nested_struct() {
+        // Test adding column mapping metadata to a schema with nested struct
+        let schema: StructType = serde_json::from_value(json!({
+            "type": "struct",
+            "fields": [
+                {"name": "id", "type": "integer", "nullable": false, "metadata": {}},
+                {
+                    "name": "address",
+                    "type": {
+                        "type": "struct",
+                        "fields": [
+                            {"name": "street", "type": "string", "nullable": true, "metadata": {}},
+                            {"name": "city", "type": "string", "nullable": true, "metadata": {}}
+                        ]
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let mapped_schema = schema.with_column_mapping_metadata().unwrap();
+
+        // Verify top-level fields have metadata
+        assert_eq!(mapped_schema.fields().count(), 2);
+
+        // Find the nested struct and verify its fields have metadata too
+        let address_field = mapped_schema.fields().find(|f| f.name() == "address").unwrap();
+        if let DataType::Struct(nested) = address_field.data_type() {
+            for field in nested.fields() {
+                assert!(
+                    field.metadata().contains_key(COLUMN_MAPPING_ID_KEY),
+                    "Nested field {} missing column ID",
+                    field.name()
+                );
+                assert!(
+                    field.metadata().contains_key(COLUMN_MAPPING_PHYSICAL_NAME_KEY),
+                    "Nested field {} missing physical name",
+                    field.name()
+                );
+            }
+        } else {
+            panic!("Expected address to be a struct type");
+        }
+    }
+
+    #[test]
+    fn test_column_mapping_get_mappings() {
+        // Test get_column_mappings() returns correct mappings
+        let schema: StructType = serde_json::from_value(json!({
+            "type": "struct",
+            "fields": [
+                {
+                    "name": "id",
+                    "type": "integer",
+                    "nullable": false,
+                    "metadata": {
+                        "delta.columnMapping.id": 1,
+                        "delta.columnMapping.physicalName": "col-abc-123"
+                    }
+                },
+                {
+                    "name": "user name",
+                    "type": "string",
+                    "nullable": true,
+                    "metadata": {
+                        "delta.columnMapping.id": 2,
+                        "delta.columnMapping.physicalName": "col-def-456"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let (physical_map, id_map) = schema.get_column_mappings();
+
+        // Verify physical name mappings
+        assert_eq!(physical_map.len(), 2);
+        assert_eq!(physical_map.get("id"), Some(&"col-abc-123".to_string()));
+        assert_eq!(physical_map.get("user name"), Some(&"col-def-456".to_string()));
+
+        // Verify ID mappings
+        assert_eq!(id_map.len(), 2);
+        assert_eq!(id_map.get("id"), Some(&1));
+        assert_eq!(id_map.get("user name"), Some(&2));
+    }
+
+    #[test]
+    fn test_column_mapping_metadata_array_of_structs() {
+        // Test adding column mapping metadata to array of structs
+        let schema: StructType = serde_json::from_value(json!({
+            "type": "struct",
+            "fields": [
+                {
+                    "name": "items",
+                    "type": {
+                        "type": "array",
+                        "elementType": {
+                            "type": "struct",
+                            "fields": [
+                                {"name": "name", "type": "string", "nullable": true, "metadata": {}},
+                                {"name": "price", "type": "double", "nullable": true, "metadata": {}}
+                            ]
+                        },
+                        "containsNull": true
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                }
+            ]
+        }))
+        .unwrap();
+
+        let mapped_schema = schema.with_column_mapping_metadata().unwrap();
+
+        // Find the array field and verify its element struct fields have metadata
+        let items_field = mapped_schema.fields().find(|f| f.name() == "items").unwrap();
+        if let DataType::Array(array_type) = items_field.data_type() {
+            if let DataType::Struct(elem_struct) = array_type.element_type() {
+                for field in elem_struct.fields() {
+                    assert!(
+                        field.metadata().contains_key(COLUMN_MAPPING_ID_KEY),
+                        "Array element field {} missing column ID",
+                        field.name()
+                    );
+                    assert!(
+                        field.metadata().contains_key(COLUMN_MAPPING_PHYSICAL_NAME_KEY),
+                        "Array element field {} missing physical name",
+                        field.name()
+                    );
+                }
+            } else {
+                panic!("Expected array element to be a struct type");
+            }
+        } else {
+            panic!("Expected items to be an array type");
+        }
+    }
 }
