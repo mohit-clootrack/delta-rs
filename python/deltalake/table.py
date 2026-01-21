@@ -94,6 +94,15 @@ class _ColumnMappingDataset:
         """Return the logical schema with user-friendly column names."""
         return self._logical_schema
 
+    def _translate_columns_to_physical(
+        self, columns: list[str] | None
+    ) -> list[str] | None:
+        """Translate logical column names to physical column names for reading."""
+        if columns is None:
+            return None
+        logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
+        return [logical_to_physical.get(col, col) for col in columns]
+
     def to_table(
         self,
         columns: list[str] | None = None,
@@ -101,13 +110,7 @@ class _ColumnMappingDataset:
         **kwargs: Any,
     ) -> "pyarrow.Table":
         """Read the dataset to a PyArrow Table, translating column names."""
-        # Translate logical column names to physical column names for reading
-        physical_columns = None
-        if columns is not None:
-            logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
-            physical_columns = [
-                logical_to_physical.get(col, col) for col in columns
-            ]
+        physical_columns = self._translate_columns_to_physical(columns)
 
         # Read with physical column names
         table = self._base_dataset.to_table(
@@ -135,13 +138,7 @@ class _ColumnMappingDataset:
         **kwargs: Any,
     ) -> Generator["pyarrow.RecordBatch", None, None]:
         """Read the dataset as batches, translating column names."""
-        # Translate logical column names to physical column names for reading
-        physical_columns = None
-        if columns is not None:
-            logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
-            physical_columns = [
-                logical_to_physical.get(col, col) for col in columns
-            ]
+        physical_columns = self._translate_columns_to_physical(columns)
 
         # Read batches with physical column names and rename
         for batch in self._base_dataset.to_batches(

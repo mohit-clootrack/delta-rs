@@ -337,19 +337,18 @@ pub(crate) async fn write_execution_plan_v3(
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
     // Get column mapping mode and build logical-to-physical name mapping and logical-to-id mapping
+    // Uses get_column_mappings() for efficient single traversal when both mappings are needed
     let (column_mapping_mode, logical_to_physical, logical_to_id) = if let Some(snapshot) = snapshot {
         let mode = snapshot.table_configuration().column_mapping_mode();
         if mode == ColumnMappingMode::None {
             (ColumnMappingMode::None, HashMap::new(), HashMap::new())
         } else {
-            let physical_mapping = snapshot.schema().get_logical_to_physical_mapping();
-            let id_mapping = snapshot.schema().get_logical_to_id_mapping();
+            let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
             (mode, physical_mapping, id_mapping)
         }
     } else if let Some(target_schema) = target_schema_with_column_mapping {
         // For new tables with column mapping, extract mappings from target schema metadata
-        let physical_mapping = target_schema.get_logical_to_physical_mapping();
-        let id_mapping = target_schema.get_logical_to_id_mapping();
+        let (physical_mapping, id_mapping) = target_schema.get_column_mappings();
         if physical_mapping.is_empty() {
             (ColumnMappingMode::None, HashMap::new(), HashMap::new())
         } else {

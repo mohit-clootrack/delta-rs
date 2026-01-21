@@ -15,6 +15,11 @@ use crate::kernel::error::Error;
 use crate::schema::DataCheck;
 use crate::table::GeneratedColumn;
 
+/// Metadata key for column mapping physical name
+pub const COLUMN_MAPPING_PHYSICAL_NAME_KEY: &str = "delta.columnMapping.physicalName";
+/// Metadata key for column mapping column ID
+pub const COLUMN_MAPPING_ID_KEY: &str = "delta.columnMapping.id";
+
 /// Type alias for a top level schema
 pub type Schema = StructType;
 /// Schema reference type
@@ -73,6 +78,10 @@ pub trait StructTypeExt {
     /// Build a mapping from logical column names to column IDs
     /// based on the column mapping metadata in this schema.
     fn get_logical_to_id_mapping(&self) -> HashMap<String, i32>;
+
+    /// Build both mappings (logical-to-physical and logical-to-id) in a single traversal.
+    /// This is more efficient when both mappings are needed.
+    fn get_column_mappings(&self) -> (HashMap<String, String>, HashMap<String, i32>);
 }
 
 impl StructTypeExt for StructType {
@@ -192,11 +201,11 @@ impl StructTypeExt for StructType {
                 .collect();
 
             metadata.push((
-                "delta.columnMapping.id".to_string(),
+                COLUMN_MAPPING_ID_KEY.to_string(),
                 MetadataValue::Number(column_id),
             ));
             metadata.push((
-                "delta.columnMapping.physicalName".to_string(),
+                COLUMN_MAPPING_PHYSICAL_NAME_KEY.to_string(),
                 MetadataValue::String(physical_name),
             ));
 
@@ -268,58 +277,61 @@ impl StructTypeExt for StructType {
             .map(|f| add_metadata_to_field(f, &mut column_id_counter))
             .collect();
 
-        StructType::try_new(new_fields?).map_err(|e| Error::Generic(e.to_string()))
+        StructType::try_new(new_fields?).map_err(|e| {
+            Error::Generic(format!(
+                "Failed to create schema with column mapping metadata: {}",
+                e
+            ))
+        })
     }
 
     /// Build a mapping from logical column names to physical column names
     fn get_logical_to_physical_mapping(&self) -> HashMap<String, String> {
-        fn collect_mappings(schema: &StructType, result: &mut HashMap<String, String>) {
+        self.get_column_mappings().0
+    }
+
+    /// Build a mapping from logical column names to column IDs
+    fn get_logical_to_id_mapping(&self) -> HashMap<String, i32> {
+        self.get_column_mappings().1
+    }
+
+    /// Build both mappings (logical-to-physical and logical-to-id) in a single traversal.
+    /// This is more efficient when both mappings are needed.
+    fn get_column_mappings(&self) -> (HashMap<String, String>, HashMap<String, i32>) {
+        fn collect_mappings(
+            schema: &StructType,
+            physical_map: &mut HashMap<String, String>,
+            id_map: &mut HashMap<String, i32>,
+        ) {
             for field in schema.fields() {
                 let logical_name = field.name().to_string();
 
                 // Get physical name from metadata if present
                 if let Some(MetadataValue::String(physical_name)) =
-                    field.metadata().get("delta.columnMapping.physicalName")
+                    field.metadata().get(COLUMN_MAPPING_PHYSICAL_NAME_KEY)
                     && &logical_name != physical_name
                 {
-                    result.insert(logical_name.clone(), physical_name.clone());
+                    physical_map.insert(logical_name.clone(), physical_name.clone());
                 }
-
-                // Recursively handle nested structs
-                if let DataType::Struct(nested) = field.data_type() {
-                    collect_mappings(nested.as_ref(), result);
-                }
-            }
-        }
-
-        let mut mappings = HashMap::new();
-        collect_mappings(self, &mut mappings);
-        mappings
-    }
-
-    /// Build a mapping from logical column names to column IDs
-    fn get_logical_to_id_mapping(&self) -> HashMap<String, i32> {
-        fn collect_mappings(schema: &StructType, result: &mut HashMap<String, i32>) {
-            for field in schema.fields() {
-                let logical_name = field.name().to_string();
 
                 // Get column ID from metadata if present
                 if let Some(MetadataValue::Number(id)) =
-                    field.metadata().get("delta.columnMapping.id")
+                    field.metadata().get(COLUMN_MAPPING_ID_KEY)
                 {
-                    result.insert(logical_name.clone(), *id as i32);
+                    id_map.insert(logical_name.clone(), *id as i32);
                 }
 
                 // Recursively handle nested structs
                 if let DataType::Struct(nested) = field.data_type() {
-                    collect_mappings(nested.as_ref(), result);
+                    collect_mappings(nested.as_ref(), physical_map, id_map);
                 }
             }
         }
 
-        let mut mappings = HashMap::new();
-        collect_mappings(self, &mut mappings);
-        mappings
+        let mut physical_mappings = HashMap::new();
+        let mut id_mappings = HashMap::new();
+        collect_mappings(self, &mut physical_mappings, &mut id_mappings);
+        (physical_mappings, id_mappings)
     }
 }
 

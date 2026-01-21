@@ -88,6 +88,25 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[cfg(any(not(target_family = "unix"), target_os = "emscripten"))]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Build a mapping from physical column names to logical column names for a snapshot.
+/// Returns an empty HashMap if column mapping is not enabled.
+fn build_physical_to_logical_mapping(snapshot: &EagerSnapshot) -> HashMap<String, String> {
+    let column_mapping_mode = snapshot.table_configuration().column_mapping_mode();
+    if column_mapping_mode == ColumnMappingMode::None {
+        return HashMap::new();
+    }
+
+    snapshot
+        .schema()
+        .fields()
+        .map(|field| {
+            let logical_name = field.name().to_string();
+            let physical_name = field.physical_name(column_mapping_mode).to_string();
+            (physical_name, logical_name)
+        })
+        .collect()
+}
+
 #[derive(FromPyObject)]
 enum PartitionFilterValue {
     Single(PyBackedStr),
@@ -478,23 +497,7 @@ impl RawDeltaTable {
     /// Returns an empty dict if column mapping is not enabled.
     pub fn get_physical_to_logical_column_mapping(&self) -> PyResult<HashMap<String, String>> {
         let snapshot = self.cloned_state()?;
-        let column_mapping_mode = snapshot.table_configuration().column_mapping_mode();
-
-        if column_mapping_mode == ColumnMappingMode::None {
-            return Ok(HashMap::new());
-        }
-
-        let mapping: HashMap<String, String> = snapshot
-            .schema()
-            .fields()
-            .map(|field| {
-                let logical_name = field.name().to_string();
-                let physical_name = field.physical_name(column_mapping_mode).to_string();
-                (physical_name, logical_name)
-            })
-            .collect();
-
-        Ok(mapping)
+        Ok(build_physical_to_logical_mapping(&snapshot))
     }
 
     /// Run the Vacuum command on the Delta Table: list and delete files no longer referenced
@@ -1157,23 +1160,9 @@ impl RawDeltaTable {
 
         let schema = schema.into_inner();
 
-        // Get column mapping mode and build physical-to-logical name mapping
+        // Get physical-to-logical column name mapping for column mapping support
         let snapshot = self.cloned_state()?;
-        let column_mapping_mode = snapshot.table_configuration().column_mapping_mode();
-        let physical_to_logical: HashMap<String, String> =
-            if column_mapping_mode != ColumnMappingMode::None {
-                snapshot
-                    .schema()
-                    .fields()
-                    .map(|field| {
-                        let logical_name = field.name().to_string();
-                        let physical_name = field.physical_name(column_mapping_mode).to_string();
-                        (physical_name, logical_name)
-                    })
-                    .collect()
-            } else {
-                HashMap::new()
-            };
+        let physical_to_logical = build_physical_to_logical_mapping(&snapshot);
 
         let inclusion_stats_cols = if let Some(stats_cols) = stats_cols {
             stats_cols
