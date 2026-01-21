@@ -27,23 +27,13 @@ os.makedirs(test_dir)
 
 print(f"\nTable path: {table_path}")
 
-# Local jars path - requires PySpark 3.5.x with Delta 4.0.1
-# Note: Delta 4.0.1 is not compatible with PySpark 4.x
-jars_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "jars")
-jar_files = [
-    os.path.join(jars_dir, "delta-spark_2.13-4.0.1.jar"),
-    os.path.join(jars_dir, "delta-storage-4.0.1.jar"),
-    os.path.join(jars_dir, "antlr4-runtime-4.13.1.jar"),
-]
-jars_string = ",".join(jar_files)
-print(f"Using jars: {jars_string}")
-
 from pyspark.sql import SparkSession
 
-# Configure Spark with local jars (no Maven resolution)
+# Use delta-spark from Maven with correct Scala version (2.12 for Spark 3.5.x)
+# Note: delta-spark 3.2.x requires PySpark 3.5.x (Delta 4.x is for Spark 4.x)
 spark = SparkSession.builder \
     .appName("DeltaColumnMappingTest") \
-    .config("spark.jars", jars_string) \
+    .config("spark.jars.packages", "io.delta:delta-spark_2.12:3.2.1") \
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .config("spark.driver.memory", "2g") \
