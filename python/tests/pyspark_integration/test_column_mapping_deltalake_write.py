@@ -134,19 +134,28 @@ print("\n\n" + "="*60)
 print("Reading Delta table with PySpark")
 print("="*60)
 
-from pyspark.sql import SparkSession
-from delta import configure_spark_with_delta_pip
+# Local jars path - requires PySpark 3.5.x with Delta 4.0.1
+# Note: Delta 4.0.1 is not compatible with PySpark 4.x
+jars_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "jars")
+jar_files = [
+    os.path.join(jars_dir, "delta-spark_2.13-4.0.1.jar"),
+    os.path.join(jars_dir, "delta-storage-4.0.1.jar"),
+    os.path.join(jars_dir, "antlr4-runtime-4.13.1.jar"),
+]
+jars_string = ",".join(jar_files)
 
-# Use delta-spark from PyPI (handles JARs automatically)
-builder = SparkSession.builder \
+from pyspark.sql import SparkSession
+
+# Configure Spark with local jars (no Maven resolution)
+spark = SparkSession.builder \
     .appName("DeltaColumnMappingReadTest") \
+    .config("spark.jars", jars_string) \
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .config("spark.driver.memory", "2g") \
     .config("spark.sql.warehouse.dir", test_dir) \
-    .master("local[*]")
-
-spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    .master("local[*]") \
+    .getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
 print("Spark session created successfully!")
