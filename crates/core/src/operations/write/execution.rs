@@ -72,6 +72,44 @@ fn build_logical_to_physical_mapping(
     mappings
 }
 
+/// Build a mapping from logical column names to column IDs
+/// based on the schema and column mapping mode.
+fn build_logical_to_id_mapping(
+    schema: &StructType,
+    column_mapping_mode: ColumnMappingMode,
+) -> HashMap<String, i32> {
+    use delta_kernel::schema::MetadataValue;
+
+    if column_mapping_mode == ColumnMappingMode::None {
+        return HashMap::new();
+    }
+
+    fn collect_id_mappings(
+        schema: &StructType,
+        result: &mut HashMap<String, i32>,
+    ) {
+        for field in schema.fields() {
+            let logical_name = field.name().to_string();
+
+            // Get the column ID from metadata
+            if let Some(MetadataValue::Number(id)) =
+                field.metadata().get("delta.columnMapping.id")
+            {
+                result.insert(logical_name.clone(), *id as i32);
+            }
+
+            // Recursively handle nested structs
+            if let delta_kernel::schema::DataType::Struct(nested) = field.data_type() {
+                collect_id_mappings(nested.as_ref(), result);
+            }
+        }
+    }
+
+    let mut mappings = HashMap::new();
+    collect_id_mappings(schema, &mut mappings);
+    mappings
+}
+
 fn channel_size() -> usize {
     static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
     *CHANNEL_SIZE.get_or_init(|| {
@@ -371,21 +409,23 @@ pub(crate) async fn write_execution_plan_v3(
 
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
-    // Get column mapping mode and build logical-to-physical name mapping if applicable
-    let (column_mapping_mode, logical_to_physical) = if let Some(snapshot) = snapshot {
+    // Get column mapping mode and build logical-to-physical name mapping and logical-to-id mapping
+    let (column_mapping_mode, logical_to_physical, logical_to_id) = if let Some(snapshot) = snapshot {
         let mode = snapshot.table_configuration().column_mapping_mode();
-        let mapping = build_logical_to_physical_mapping(&snapshot.schema(), mode);
-        (mode, mapping)
+        let physical_mapping = build_logical_to_physical_mapping(&snapshot.schema(), mode);
+        let id_mapping = build_logical_to_id_mapping(&snapshot.schema(), mode);
+        (mode, physical_mapping, id_mapping)
     } else if let Some(target_schema) = target_schema_with_column_mapping {
-        // For new tables with column mapping, extract mapping from target schema metadata
-        let mapping = target_schema.get_logical_to_physical_mapping();
-        if mapping.is_empty() {
-            (ColumnMappingMode::None, HashMap::new())
+        // For new tables with column mapping, extract mappings from target schema metadata
+        let physical_mapping = target_schema.get_logical_to_physical_mapping();
+        let id_mapping = build_logical_to_id_mapping(target_schema, ColumnMappingMode::Name);
+        if physical_mapping.is_empty() {
+            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
         } else {
-            (ColumnMappingMode::Name, mapping)
+            (ColumnMappingMode::Name, physical_mapping, id_mapping)
         }
     } else {
-        (ColumnMappingMode::None, HashMap::new())
+        (ColumnMappingMode::None, HashMap::new(), HashMap::new())
     };
 
     // Write data to disk
@@ -401,6 +441,7 @@ pub(crate) async fn write_execution_plan_v3(
             writer_stats_config.stats_columns.clone(),
             column_mapping_mode,
             logical_to_physical,
+            logical_to_id.clone(),
         );
 
         let partition_streams: Vec<SendableRecordBatchStream> =
@@ -493,6 +534,7 @@ pub(crate) async fn write_execution_plan_v3(
             writer_stats_config.stats_columns.clone(),
             column_mapping_mode,
             logical_to_physical.clone(),
+            logical_to_id.clone(),
         );
 
         let cdf_config = WriterConfig::new_with_column_mapping(
@@ -505,6 +547,7 @@ pub(crate) async fn write_execution_plan_v3(
             writer_stats_config.stats_columns.clone(),
             column_mapping_mode,
             logical_to_physical.clone(),
+            logical_to_id.clone(),
         );
 
         // partition streams

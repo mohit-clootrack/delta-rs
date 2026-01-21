@@ -34,57 +34,66 @@ use crate::writer::utils::{
 
 use parquet::file::metadata::ParquetMetaData;
 
-/// Transform an Arrow field to use physical column name
+/// Transform an Arrow field to use physical column name and add parquet field ID if needed
 fn transform_field_to_physical(
     field: &ArrowField,
     logical_to_physical: &HashMap<String, String>,
+    logical_to_id: &HashMap<String, i32>,
 ) -> ArrowField {
+    let logical_name = field.name();
     let physical_name = logical_to_physical
-        .get(field.name())
+        .get(logical_name)
         .cloned()
-        .unwrap_or_else(|| field.name().clone());
+        .unwrap_or_else(|| logical_name.clone());
 
     // Handle nested structs recursively
     let new_data_type = match field.data_type() {
         arrow_schema::DataType::Struct(fields) => {
             let new_fields: Vec<ArrowField> = fields
                 .iter()
-                .map(|f| transform_field_to_physical(f.as_ref(), logical_to_physical))
+                .map(|f| transform_field_to_physical(f.as_ref(), logical_to_physical, logical_to_id))
                 .collect();
             arrow_schema::DataType::Struct(new_fields.into())
         }
         arrow_schema::DataType::List(inner) => {
-            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical);
+            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical, logical_to_id);
             arrow_schema::DataType::List(Arc::new(new_inner))
         }
         arrow_schema::DataType::LargeList(inner) => {
-            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical);
+            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical, logical_to_id);
             arrow_schema::DataType::LargeList(Arc::new(new_inner))
         }
         arrow_schema::DataType::Map(inner, sorted) => {
-            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical);
+            let new_inner = transform_field_to_physical(inner.as_ref(), logical_to_physical, logical_to_id);
             arrow_schema::DataType::Map(Arc::new(new_inner), *sorted)
         }
         other => other.clone(),
     };
 
+    // Build metadata, adding PARQUET:field_id if we have a column ID for this field
+    let mut metadata = field.metadata().clone();
+    if let Some(id) = logical_to_id.get(logical_name) {
+        metadata.insert(PARQUET_FIELD_ID_META_KEY.to_string(), id.to_string());
+    }
+
     ArrowField::new(physical_name, new_data_type, field.is_nullable())
-        .with_metadata(field.metadata().clone())
+        .with_metadata(metadata)
 }
 
-/// Transform an Arrow schema to use physical column names
+/// Transform an Arrow schema to use physical column names and add parquet field IDs
 fn transform_schema_to_physical(
     schema: &ArrowSchema,
     logical_to_physical: &HashMap<String, String>,
+    logical_to_id: &HashMap<String, i32>,
 ) -> ArrowSchemaRef {
-    if logical_to_physical.is_empty() {
+    if logical_to_physical.is_empty() && logical_to_id.is_empty() {
         return Arc::new(schema.clone());
     }
 
     let new_fields: Vec<ArrowField> = schema
         .fields()
         .iter()
-        .map(|f| transform_field_to_physical(f.as_ref(), logical_to_physical))
+        .map(|f| transform_field_to_physical(f.as_ref(), logical_to_physical, logical_to_id))
         .collect();
 
     Arc::new(ArrowSchema::new_with_metadata(
@@ -93,16 +102,17 @@ fn transform_schema_to_physical(
     ))
 }
 
-/// Transform a RecordBatch to use physical column names in its schema
+/// Transform a RecordBatch to use physical column names in its schema and add parquet field IDs
 fn transform_batch_to_physical(
     batch: &RecordBatch,
     logical_to_physical: &HashMap<String, String>,
+    logical_to_id: &HashMap<String, i32>,
 ) -> DeltaResult<RecordBatch> {
-    if logical_to_physical.is_empty() {
+    if logical_to_physical.is_empty() && logical_to_id.is_empty() {
         return Ok(batch.clone());
     }
 
-    let physical_schema = transform_schema_to_physical(batch.schema().as_ref(), logical_to_physical);
+    let physical_schema = transform_schema_to_physical(batch.schema().as_ref(), logical_to_physical, logical_to_id);
     RecordBatch::try_new(physical_schema, batch.columns().to_vec())
         .map_err(|e| DeltaTableError::Arrow { source: e })
 }
@@ -198,6 +208,9 @@ impl From<WriteError> for DeltaTableError {
     }
 }
 
+/// The parquet field ID metadata key
+const PARQUET_FIELD_ID_META_KEY: &str = "PARQUET:field_id";
+
 /// Configuration to write data into Delta tables
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
@@ -220,6 +233,8 @@ pub struct WriterConfig {
     column_mapping_mode: ColumnMappingMode,
     /// Mapping from logical column names to physical column names
     logical_to_physical: std::collections::HashMap<String, String>,
+    /// Mapping from logical column names to column IDs (for id mode column mapping)
+    logical_to_id: std::collections::HashMap<String, i32>,
 }
 
 impl WriterConfig {
@@ -243,10 +258,12 @@ impl WriterConfig {
             stats_columns,
             ColumnMappingMode::None,
             std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         )
     }
 
     /// Create a new instance of [WriterConfig] with column mapping support.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_column_mapping(
         table_schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
@@ -257,6 +274,7 @@ impl WriterConfig {
         stats_columns: Option<Vec<String>>,
         column_mapping_mode: ColumnMappingMode,
         logical_to_physical: std::collections::HashMap<String, String>,
+        logical_to_id: std::collections::HashMap<String, i32>,
     ) -> Self {
         let writer_properties = writer_properties.unwrap_or_else(|| {
             WriterProperties::builder()
@@ -276,6 +294,7 @@ impl WriterConfig {
             stats_columns,
             column_mapping_mode,
             logical_to_physical,
+            logical_to_id,
         }
     }
 
@@ -367,6 +386,7 @@ impl DeltaWriter {
                     Some(self.config.write_batch_size),
                     None,
                     self.config.logical_to_physical.clone(),
+                    self.config.logical_to_id.clone(),
                 )?;
                 let mut writer = PartitionWriter::try_with_config(
                     self.object_store.clone(),
@@ -436,6 +456,8 @@ pub struct PartitionWriterConfig {
     max_concurrency_tasks: usize,
     /// Mapping from logical column names to physical column names
     logical_to_physical: HashMap<String, String>,
+    /// Mapping from logical column names to column IDs (for id mode column mapping)
+    logical_to_id: HashMap<String, i32>,
 }
 
 impl PartitionWriterConfig {
@@ -456,10 +478,12 @@ impl PartitionWriterConfig {
             write_batch_size,
             max_concurrency_tasks,
             HashMap::new(),
+            HashMap::new(),
         )
     }
 
     /// Create a new instance of [PartitionWriterConfig] with column mapping support
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new_with_column_mapping(
         file_schema: ArrowSchemaRef,
         partition_values: IndexMap<String, Scalar>,
@@ -468,9 +492,10 @@ impl PartitionWriterConfig {
         write_batch_size: Option<usize>,
         max_concurrency_tasks: Option<usize>,
         logical_to_physical: HashMap<String, String>,
+        logical_to_id: HashMap<String, i32>,
     ) -> DeltaResult<Self> {
-        // Transform file schema to use physical column names for Parquet writing
-        let file_schema = transform_schema_to_physical(&file_schema, &logical_to_physical);
+        // Transform file schema to use physical column names and add parquet field IDs
+        let file_schema = transform_schema_to_physical(&file_schema, &logical_to_physical, &logical_to_id);
 
         let part_path = partition_values.hive_partition_path();
         let prefix = Path::parse(part_path)?;
@@ -491,6 +516,7 @@ impl PartitionWriterConfig {
             write_batch_size,
             max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
             logical_to_physical,
+            logical_to_id,
         })
     }
 
@@ -632,8 +658,8 @@ impl PartitionWriter {
     /// The `close` method has to be invoked to write all data still buffered
     /// and get the list of all written files.
     pub async fn write(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
-        // Transform batch to use physical column names if column mapping is enabled
-        let batch = transform_batch_to_physical(batch, &self.config.logical_to_physical)?;
+        // Transform batch to use physical column names and add parquet field IDs if column mapping is enabled
+        let batch = transform_batch_to_physical(batch, &self.config.logical_to_physical, &self.config.logical_to_id)?;
 
         if batch.schema() != self.config.file_schema {
             return Err(WriteError::SchemaMismatch {
