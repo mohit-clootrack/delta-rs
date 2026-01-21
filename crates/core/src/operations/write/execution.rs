@@ -37,79 +37,6 @@ use crate::table::config::TablePropertiesExt as _;
 
 const DEFAULT_WRITER_BATCH_CHANNEL_SIZE: usize = 10;
 
-/// Build a mapping from logical column names to physical column names
-/// based on the schema and column mapping mode.
-fn build_logical_to_physical_mapping(
-    schema: &StructType,
-    column_mapping_mode: ColumnMappingMode,
-) -> HashMap<String, String> {
-    if column_mapping_mode == ColumnMappingMode::None {
-        return HashMap::new();
-    }
-
-    fn collect_mappings(
-        schema: &StructType,
-        column_mapping_mode: ColumnMappingMode,
-        result: &mut HashMap<String, String>,
-    ) {
-        for field in schema.fields() {
-            let logical_name = field.name().to_string();
-            let physical_name = field.physical_name(column_mapping_mode).to_string();
-
-            if logical_name != physical_name {
-                result.insert(logical_name.clone(), physical_name);
-            }
-
-            // Recursively handle nested structs
-            if let delta_kernel::schema::DataType::Struct(nested) = field.data_type() {
-                collect_mappings(nested.as_ref(), column_mapping_mode, result);
-            }
-        }
-    }
-
-    let mut mappings = HashMap::new();
-    collect_mappings(schema, column_mapping_mode, &mut mappings);
-    mappings
-}
-
-/// Build a mapping from logical column names to column IDs
-/// based on the schema and column mapping mode.
-fn build_logical_to_id_mapping(
-    schema: &StructType,
-    column_mapping_mode: ColumnMappingMode,
-) -> HashMap<String, i32> {
-    use delta_kernel::schema::MetadataValue;
-
-    if column_mapping_mode == ColumnMappingMode::None {
-        return HashMap::new();
-    }
-
-    fn collect_id_mappings(
-        schema: &StructType,
-        result: &mut HashMap<String, i32>,
-    ) {
-        for field in schema.fields() {
-            let logical_name = field.name().to_string();
-
-            // Get the column ID from metadata
-            if let Some(MetadataValue::Number(id)) =
-                field.metadata().get("delta.columnMapping.id")
-            {
-                result.insert(logical_name.clone(), *id as i32);
-            }
-
-            // Recursively handle nested structs
-            if let delta_kernel::schema::DataType::Struct(nested) = field.data_type() {
-                collect_id_mappings(nested.as_ref(), result);
-            }
-        }
-    }
-
-    let mut mappings = HashMap::new();
-    collect_id_mappings(schema, &mut mappings);
-    mappings
-}
-
 fn channel_size() -> usize {
     static CHANNEL_SIZE: OnceLock<usize> = OnceLock::new();
     *CHANNEL_SIZE.get_or_init(|| {
@@ -412,13 +339,17 @@ pub(crate) async fn write_execution_plan_v3(
     // Get column mapping mode and build logical-to-physical name mapping and logical-to-id mapping
     let (column_mapping_mode, logical_to_physical, logical_to_id) = if let Some(snapshot) = snapshot {
         let mode = snapshot.table_configuration().column_mapping_mode();
-        let physical_mapping = build_logical_to_physical_mapping(&snapshot.schema(), mode);
-        let id_mapping = build_logical_to_id_mapping(&snapshot.schema(), mode);
-        (mode, physical_mapping, id_mapping)
+        if mode == ColumnMappingMode::None {
+            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+        } else {
+            let physical_mapping = snapshot.schema().get_logical_to_physical_mapping();
+            let id_mapping = snapshot.schema().get_logical_to_id_mapping();
+            (mode, physical_mapping, id_mapping)
+        }
     } else if let Some(target_schema) = target_schema_with_column_mapping {
         // For new tables with column mapping, extract mappings from target schema metadata
         let physical_mapping = target_schema.get_logical_to_physical_mapping();
-        let id_mapping = build_logical_to_id_mapping(target_schema, ColumnMappingMode::Name);
+        let id_mapping = target_schema.get_logical_to_id_mapping();
         if physical_mapping.is_empty() {
             (ColumnMappingMode::None, HashMap::new(), HashMap::new())
         } else {
@@ -431,18 +362,30 @@ pub(crate) async fn write_execution_plan_v3(
     // Write data to disk
     // We drive partition streams concurrently and centralize writes via an mpsc channel.
     if !contains_cdc {
-        let config = WriterConfig::new_with_column_mapping(
+        let mut config = WriterConfig::new(
             schema.clone(),
             partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
             writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
-            column_mapping_mode,
-            logical_to_physical,
-            logical_to_id.clone(),
         );
+        if let Some(props) = writer_properties.clone() {
+            config = config.with_writer_properties(props);
+        }
+        if let Some(size) = target_file_size {
+            config = config.with_target_file_size(size);
+        }
+        if let Some(size) = write_batch_size {
+            config = config.with_write_batch_size(size);
+        }
+        if let Some(columns) = writer_stats_config.stats_columns.clone() {
+            config = config.with_stats_columns(columns);
+        }
+        if column_mapping_mode != ColumnMappingMode::None {
+            config = config.with_column_mapping(
+                column_mapping_mode,
+                logical_to_physical,
+                logical_to_id.clone(),
+            );
+        }
 
         let partition_streams: Vec<SendableRecordBatchStream> =
             execute_stream_partitioned(plan, session.task_ctx())?;
@@ -524,31 +467,37 @@ pub(crate) async fn write_execution_plan_v3(
         ));
         let cdf_schema = schema.clone();
 
-        let normal_config = WriterConfig::new_with_column_mapping(
-            write_schema.clone(),
-            partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
-            writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
-            column_mapping_mode,
-            logical_to_physical.clone(),
-            logical_to_id.clone(),
-        );
+        // Helper to build writer config with common options
+        let build_config = |schema| {
+            let mut config = WriterConfig::new(
+                schema,
+                partition_columns.clone(),
+                writer_stats_config.num_indexed_cols,
+            );
+            if let Some(props) = writer_properties.clone() {
+                config = config.with_writer_properties(props);
+            }
+            if let Some(size) = target_file_size {
+                config = config.with_target_file_size(size);
+            }
+            if let Some(size) = write_batch_size {
+                config = config.with_write_batch_size(size);
+            }
+            if let Some(columns) = writer_stats_config.stats_columns.clone() {
+                config = config.with_stats_columns(columns);
+            }
+            if column_mapping_mode != ColumnMappingMode::None {
+                config = config.with_column_mapping(
+                    column_mapping_mode,
+                    logical_to_physical.clone(),
+                    logical_to_id.clone(),
+                );
+            }
+            config
+        };
 
-        let cdf_config = WriterConfig::new_with_column_mapping(
-            cdf_schema.clone(),
-            partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
-            writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
-            column_mapping_mode,
-            logical_to_physical.clone(),
-            logical_to_id.clone(),
-        );
+        let normal_config = build_config(write_schema.clone());
+        let cdf_config = build_config(cdf_schema.clone());
 
         // partition streams
         let partition_streams = execute_stream_partitioned(plan, session.task_ctx())?;

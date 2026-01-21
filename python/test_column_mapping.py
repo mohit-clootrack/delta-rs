@@ -27,28 +27,19 @@ os.makedirs(test_dir)
 
 print(f"\nTable path: {table_path}")
 
-# Local jars path
-jars_dir = "/home/user/delta-rs/python/jars"
-jar_files = [
-    os.path.join(jars_dir, "delta-spark_2.13-4.0.1.jar"),
-    os.path.join(jars_dir, "delta-storage-4.0.1.jar"),
-    os.path.join(jars_dir, "antlr4-runtime-4.13.1.jar"),
-]
-jars_string = ",".join(jar_files)
-print(f"Using jars: {jars_string}")
-
 from pyspark.sql import SparkSession
+from delta import configure_spark_with_delta_pip
 
-# Configure Spark with local jars (no Maven resolution)
-spark = SparkSession.builder \
+# Use delta-spark from PyPI (handles JARs automatically)
+builder = SparkSession.builder \
     .appName("DeltaColumnMappingTest") \
-    .config("spark.jars", jars_string) \
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
     .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .config("spark.driver.memory", "2g") \
     .config("spark.sql.warehouse.dir", test_dir) \
-    .master("local[*]") \
-    .getOrCreate()
+    .master("local[*]")
+
+spark = configure_spark_with_delta_pip(builder).getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
 print("Spark session created successfully!")

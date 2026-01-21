@@ -232,70 +232,77 @@ pub struct WriterConfig {
     /// Column mapping mode for the table
     column_mapping_mode: ColumnMappingMode,
     /// Mapping from logical column names to physical column names
-    logical_to_physical: std::collections::HashMap<String, String>,
+    logical_to_physical: HashMap<String, String>,
     /// Mapping from logical column names to column IDs (for id mode column mapping)
-    logical_to_id: std::collections::HashMap<String, i32>,
+    logical_to_id: HashMap<String, i32>,
 }
 
 impl WriterConfig {
-    /// Create a new instance of [WriterConfig].
+    /// Create a new instance of [WriterConfig] with required fields and sensible defaults.
+    ///
+    /// Use the builder methods to customize the configuration:
+    /// - [`with_writer_properties`](Self::with_writer_properties) - Set parquet writer properties
+    /// - [`with_target_file_size`](Self::with_target_file_size) - Set target file size
+    /// - [`with_write_batch_size`](Self::with_write_batch_size) - Set write batch size
+    /// - [`with_num_indexed_cols`](Self::with_num_indexed_cols) - Set number of indexed columns
+    /// - [`with_stats_columns`](Self::with_stats_columns) - Set specific stats columns
+    /// - [`with_column_mapping`](Self::with_column_mapping) - Enable column mapping
     pub fn new(
         table_schema: ArrowSchemaRef,
         partition_columns: Vec<String>,
-        writer_properties: Option<WriterProperties>,
-        target_file_size: Option<usize>,
-        write_batch_size: Option<usize>,
         num_indexed_cols: DataSkippingNumIndexedCols,
-        stats_columns: Option<Vec<String>>,
     ) -> Self {
-        Self::new_with_column_mapping(
-            table_schema,
-            partition_columns,
-            writer_properties,
-            target_file_size,
-            write_batch_size,
-            num_indexed_cols,
-            stats_columns,
-            ColumnMappingMode::None,
-            std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
-        )
-    }
-
-    /// Create a new instance of [WriterConfig] with column mapping support.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_column_mapping(
-        table_schema: ArrowSchemaRef,
-        partition_columns: Vec<String>,
-        writer_properties: Option<WriterProperties>,
-        target_file_size: Option<usize>,
-        write_batch_size: Option<usize>,
-        num_indexed_cols: DataSkippingNumIndexedCols,
-        stats_columns: Option<Vec<String>>,
-        column_mapping_mode: ColumnMappingMode,
-        logical_to_physical: std::collections::HashMap<String, String>,
-        logical_to_id: std::collections::HashMap<String, i32>,
-    ) -> Self {
-        let writer_properties = writer_properties.unwrap_or_else(|| {
-            WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
-                .build()
-        });
-        let target_file_size = target_file_size.unwrap_or(DEFAULT_TARGET_FILE_SIZE);
-        let write_batch_size = write_batch_size.unwrap_or(DEFAULT_WRITE_BATCH_SIZE);
-
         Self {
             table_schema,
             partition_columns,
-            writer_properties,
-            target_file_size,
-            write_batch_size,
+            writer_properties: WriterProperties::builder()
+                .set_compression(Compression::SNAPPY)
+                .build(),
+            target_file_size: DEFAULT_TARGET_FILE_SIZE,
+            write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
             num_indexed_cols,
-            stats_columns,
-            column_mapping_mode,
-            logical_to_physical,
-            logical_to_id,
+            stats_columns: None,
+            column_mapping_mode: ColumnMappingMode::None,
+            logical_to_physical: HashMap::new(),
+            logical_to_id: HashMap::new(),
         }
+    }
+
+    /// Set the parquet writer properties.
+    pub fn with_writer_properties(mut self, properties: WriterProperties) -> Self {
+        self.writer_properties = properties;
+        self
+    }
+
+    /// Set the target file size in bytes.
+    pub fn with_target_file_size(mut self, size: usize) -> Self {
+        self.target_file_size = size;
+        self
+    }
+
+    /// Set the write batch size (number of rows per batch).
+    pub fn with_write_batch_size(mut self, size: usize) -> Self {
+        self.write_batch_size = size;
+        self
+    }
+
+    /// Set specific columns to collect stats from.
+    pub fn with_stats_columns(mut self, columns: Vec<String>) -> Self {
+        self.stats_columns = Some(columns);
+        self
+    }
+
+    /// Enable column mapping with the specified mode and mappings.
+    pub fn with_column_mapping(
+        mut self,
+        mode: ColumnMappingMode,
+        logical_to_physical: HashMap<String, String>,
+        logical_to_id: HashMap<String, i32>,
+    ) -> Self {
+        self.column_mapping_mode = mode;
+        self.logical_to_physical = logical_to_physical;
+        self.logical_to_id = logical_to_id;
+        self
     }
 
     /// Get the column mapping mode
@@ -378,16 +385,17 @@ impl DeltaWriter {
                 writer.write(&record_batch).await?;
             }
             None => {
-                let config = PartitionWriterConfig::try_new_with_column_mapping(
+                let config = PartitionWriterConfig::try_new(
                     self.config.file_schema(),
                     partition_values.clone(),
-                    Some(self.config.writer_properties.clone()),
-                    Some(self.config.target_file_size),
-                    Some(self.config.write_batch_size),
-                    None,
+                )?
+                .with_writer_properties(self.config.writer_properties.clone())
+                .with_target_file_size(self.config.target_file_size)
+                .with_write_batch_size(self.config.write_batch_size)
+                .with_column_mapping(
                     self.config.logical_to_physical.clone(),
                     self.config.logical_to_id.clone(),
-                )?;
+                );
                 let mut writer = PartitionWriter::try_with_config(
                     self.object_store.clone(),
                     config,
@@ -461,63 +469,74 @@ pub struct PartitionWriterConfig {
 }
 
 impl PartitionWriterConfig {
-    /// Create a new instance of [PartitionWriterConfig]
+    /// Create a new instance of [PartitionWriterConfig] with required fields and sensible defaults.
+    ///
+    /// Use the builder methods to customize the configuration:
+    /// - [`with_writer_properties`](Self::with_writer_properties) - Set parquet writer properties
+    /// - [`with_target_file_size`](Self::with_target_file_size) - Set target file size
+    /// - [`with_write_batch_size`](Self::with_write_batch_size) - Set write batch size
+    /// - [`with_max_concurrency_tasks`](Self::with_max_concurrency_tasks) - Set max concurrency
+    /// - [`with_column_mapping`](Self::with_column_mapping) - Enable column mapping
     pub fn try_new(
         file_schema: ArrowSchemaRef,
         partition_values: IndexMap<String, Scalar>,
-        writer_properties: Option<WriterProperties>,
-        target_file_size: Option<usize>,
-        write_batch_size: Option<usize>,
-        max_concurrency_tasks: Option<usize>,
     ) -> DeltaResult<Self> {
-        Self::try_new_with_column_mapping(
-            file_schema,
-            partition_values,
-            writer_properties,
-            target_file_size,
-            write_batch_size,
-            max_concurrency_tasks,
-            HashMap::new(),
-            HashMap::new(),
-        )
-    }
-
-    /// Create a new instance of [PartitionWriterConfig] with column mapping support
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_new_with_column_mapping(
-        file_schema: ArrowSchemaRef,
-        partition_values: IndexMap<String, Scalar>,
-        writer_properties: Option<WriterProperties>,
-        target_file_size: Option<usize>,
-        write_batch_size: Option<usize>,
-        max_concurrency_tasks: Option<usize>,
-        logical_to_physical: HashMap<String, String>,
-        logical_to_id: HashMap<String, i32>,
-    ) -> DeltaResult<Self> {
-        // Transform file schema to use physical column names and add parquet field IDs
-        let file_schema = transform_schema_to_physical(&file_schema, &logical_to_physical, &logical_to_id);
-
         let part_path = partition_values.hive_partition_path();
         let prefix = Path::parse(part_path)?;
-        let writer_properties = writer_properties.unwrap_or_else(|| {
-            WriterProperties::builder()
-                .set_created_by(format!("delta-rs version {}", crate_version()))
-                .build()
-        });
-        let target_file_size = target_file_size.unwrap_or(DEFAULT_TARGET_FILE_SIZE);
-        let write_batch_size = write_batch_size.unwrap_or(DEFAULT_WRITE_BATCH_SIZE);
 
         Ok(Self {
             file_schema,
             prefix,
             partition_values,
-            writer_properties,
-            target_file_size,
-            write_batch_size,
-            max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
-            logical_to_physical,
-            logical_to_id,
+            writer_properties: WriterProperties::builder()
+                .set_created_by(format!("delta-rs version {}", crate_version()))
+                .build(),
+            target_file_size: DEFAULT_TARGET_FILE_SIZE,
+            write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
+            max_concurrency_tasks: get_max_concurrency_tasks(),
+            logical_to_physical: HashMap::new(),
+            logical_to_id: HashMap::new(),
         })
+    }
+
+    /// Set the parquet writer properties.
+    pub fn with_writer_properties(mut self, properties: WriterProperties) -> Self {
+        self.writer_properties = properties;
+        self
+    }
+
+    /// Set the target file size in bytes.
+    pub fn with_target_file_size(mut self, size: usize) -> Self {
+        self.target_file_size = size;
+        self
+    }
+
+    /// Set the write batch size (number of rows per batch).
+    pub fn with_write_batch_size(mut self, size: usize) -> Self {
+        self.write_batch_size = size;
+        self
+    }
+
+    /// Set the maximum number of concurrent upload tasks.
+    pub fn with_max_concurrency_tasks(mut self, tasks: usize) -> Self {
+        self.max_concurrency_tasks = tasks;
+        self
+    }
+
+    /// Enable column mapping with the specified mappings.
+    ///
+    /// This transforms the file schema to use physical column names and adds parquet field IDs.
+    pub fn with_column_mapping(
+        mut self,
+        logical_to_physical: HashMap<String, String>,
+        logical_to_id: HashMap<String, i32>,
+    ) -> Self {
+        // Transform file schema to use physical column names and add parquet field IDs
+        self.file_schema =
+            transform_schema_to_physical(&self.file_schema, &logical_to_physical, &logical_to_id);
+        self.logical_to_physical = logical_to_physical;
+        self.logical_to_id = logical_to_id;
+        self
     }
 
     /// Convert partition values to use physical column names
@@ -752,15 +771,20 @@ mod tests {
         target_file_size: Option<usize>,
         write_batch_size: Option<usize>,
     ) -> DeltaWriter {
-        let config = WriterConfig::new(
+        let mut config = WriterConfig::new(
             batch.schema(),
             vec![],
-            writer_properties,
-            target_file_size,
-            write_batch_size,
             DataSkippingNumIndexedCols::NumColumns(DEFAULT_NUM_INDEX_COLS),
-            None,
         );
+        if let Some(props) = writer_properties {
+            config = config.with_writer_properties(props);
+        }
+        if let Some(size) = target_file_size {
+            config = config.with_target_file_size(size);
+        }
+        if let Some(size) = write_batch_size {
+            config = config.with_write_batch_size(size);
+        }
         DeltaWriter::new(object_store, config)
     }
 
@@ -771,15 +795,16 @@ mod tests {
         target_file_size: Option<usize>,
         write_batch_size: Option<usize>,
     ) -> PartitionWriter {
-        let config = PartitionWriterConfig::try_new(
-            batch.schema(),
-            IndexMap::new(),
-            writer_properties,
-            target_file_size,
-            write_batch_size,
-            None,
-        )
-        .unwrap();
+        let mut config = PartitionWriterConfig::try_new(batch.schema(), IndexMap::new()).unwrap();
+        if let Some(props) = writer_properties {
+            config = config.with_writer_properties(props);
+        }
+        if let Some(size) = target_file_size {
+            config = config.with_target_file_size(size);
+        }
+        if let Some(size) = write_batch_size {
+            config = config.with_write_batch_size(size);
+        }
         PartitionWriter::try_with_config(
             object_store,
             config,
