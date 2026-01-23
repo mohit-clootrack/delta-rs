@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::vec;
 
@@ -12,6 +13,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit, when};
 use datafusion::physical_plan::{ExecutionPlan, execute_stream_partitioned};
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
+use delta_kernel::table_features::ColumnMappingMode;
 use futures::StreamExt;
 use itertools::Itertools as _;
 use object_store::prefix::PrefixStore;
@@ -277,6 +279,44 @@ pub(crate) async fn write_execution_plan_v2(
     predicate: Option<Expr>,
     contains_cdc: bool,
 ) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    write_execution_plan_v3(
+        snapshot,
+        session,
+        plan,
+        partition_columns,
+        object_store,
+        target_file_size,
+        write_batch_size,
+        writer_properties,
+        writer_stats_config,
+        predicate,
+        contains_cdc,
+        None, // No target schema for column mapping - use snapshot or default
+    )
+    .await
+}
+
+/// Version 3 of write_execution_plan that supports column mapping for new tables
+///
+/// TODO: Consider refactoring to use a `WriteOptions` struct to group related parameters
+/// (target_file_size, write_batch_size, writer_properties, writer_stats_config) and reduce
+/// the number of function arguments.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_execution_plan_v3(
+    snapshot: Option<&EagerSnapshot>,
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+    predicate: Option<Expr>,
+    contains_cdc: bool,
+    // Optional target schema with column mapping metadata for new tables
+    target_schema_with_column_mapping: Option<&StructType>,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
     // We always take the plan Schema since the data may contain Large/View arrow types,
     // the schema and batches were prior constructed with this in mind.
     let schema = plan.schema();
@@ -300,18 +340,55 @@ pub(crate) async fn write_execution_plan_v2(
 
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
+    // Get column mapping mode and build logical-to-physical name mapping and logical-to-id mapping
+    // Uses get_column_mappings() for efficient single traversal when both mappings are needed
+    let (column_mapping_mode, logical_to_physical, logical_to_id) = if let Some(snapshot) = snapshot {
+        let mode = snapshot.table_configuration().column_mapping_mode();
+        if mode == ColumnMappingMode::None {
+            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+        } else {
+            let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
+            (mode, physical_mapping, id_mapping)
+        }
+    } else if let Some(target_schema) = target_schema_with_column_mapping {
+        // For new tables with column mapping, extract mappings from target schema metadata
+        let (physical_mapping, id_mapping) = target_schema.get_column_mappings();
+        if physical_mapping.is_empty() {
+            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+        } else {
+            (ColumnMappingMode::Name, physical_mapping, id_mapping)
+        }
+    } else {
+        (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+    };
+
     // Write data to disk
     // We drive partition streams concurrently and centralize writes via an mpsc channel.
     if !contains_cdc {
-        let config = WriterConfig::new(
+        let mut config = WriterConfig::new(
             schema.clone(),
             partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
             writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
         );
+        if let Some(props) = writer_properties.clone() {
+            config = config.with_writer_properties(props);
+        }
+        if let Some(size) = target_file_size {
+            config = config.with_target_file_size(size);
+        }
+        if let Some(size) = write_batch_size {
+            config = config.with_write_batch_size(size);
+        }
+        if let Some(columns) = writer_stats_config.stats_columns.clone() {
+            config = config.with_stats_columns(columns);
+        }
+        if column_mapping_mode != ColumnMappingMode::None {
+            config = config.with_column_mapping(
+                column_mapping_mode,
+                logical_to_physical,
+                logical_to_id.clone(),
+            );
+        }
 
         let partition_streams: Vec<SendableRecordBatchStream> =
             execute_stream_partitioned(plan, session.task_ctx())?;
@@ -393,25 +470,37 @@ pub(crate) async fn write_execution_plan_v2(
         ));
         let cdf_schema = schema.clone();
 
-        let normal_config = WriterConfig::new(
-            write_schema.clone(),
-            partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
-            writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
-        );
+        // Helper to build writer config with common options
+        let build_config = |schema| {
+            let mut config = WriterConfig::new(
+                schema,
+                partition_columns.clone(),
+                writer_stats_config.num_indexed_cols,
+            );
+            if let Some(props) = writer_properties.clone() {
+                config = config.with_writer_properties(props);
+            }
+            if let Some(size) = target_file_size {
+                config = config.with_target_file_size(size);
+            }
+            if let Some(size) = write_batch_size {
+                config = config.with_write_batch_size(size);
+            }
+            if let Some(columns) = writer_stats_config.stats_columns.clone() {
+                config = config.with_stats_columns(columns);
+            }
+            if column_mapping_mode != ColumnMappingMode::None {
+                config = config.with_column_mapping(
+                    column_mapping_mode,
+                    logical_to_physical.clone(),
+                    logical_to_id.clone(),
+                );
+            }
+            config
+        };
 
-        let cdf_config = WriterConfig::new(
-            cdf_schema.clone(),
-            partition_columns.clone(),
-            writer_properties.clone(),
-            target_file_size,
-            write_batch_size,
-            writer_stats_config.num_indexed_cols,
-            writer_stats_config.stats_columns.clone(),
-        );
+        let normal_config = build_config(write_schema.clone());
+        let cdf_config = build_config(cdf_schema.clone());
 
         // partition streams
         let partition_streams = execute_stream_partitioned(plan, session.task_ctx())?;
