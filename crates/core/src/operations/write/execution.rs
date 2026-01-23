@@ -54,22 +54,24 @@ pub(crate) struct WriteExecutionPlanMetrics {
 }
 
 /// Column mapping configuration for write operations
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ColumnMappingConfig {
     mode: ColumnMappingMode,
     logical_to_physical: HashMap<String, String>,
     logical_to_id: HashMap<String, i32>,
 }
 
-impl ColumnMappingConfig {
-    fn none() -> Self {
+impl Default for ColumnMappingConfig {
+    fn default() -> Self {
         Self {
             mode: ColumnMappingMode::None,
             logical_to_physical: HashMap::new(),
             logical_to_id: HashMap::new(),
         }
     }
+}
 
+impl ColumnMappingConfig {
     fn is_enabled(&self) -> bool {
         self.mode != ColumnMappingMode::None
     }
@@ -395,7 +397,7 @@ fn get_column_mapping_config(
     if let Some(snapshot) = snapshot {
         let mode = snapshot.table_configuration().column_mapping_mode();
         if mode == ColumnMappingMode::None {
-            ColumnMappingConfig::none()
+            ColumnMappingConfig::default()
         } else {
             let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
             ColumnMappingConfig {
@@ -408,7 +410,7 @@ fn get_column_mapping_config(
         // For new tables with column mapping, extract mappings from target schema metadata
         let (physical_mapping, id_mapping) = target_schema.get_column_mappings();
         if physical_mapping.is_empty() {
-            ColumnMappingConfig::none()
+            ColumnMappingConfig::default()
         } else {
             ColumnMappingConfig {
                 mode: ColumnMappingMode::Name,
@@ -417,7 +419,7 @@ fn get_column_mapping_config(
             }
         }
     } else {
-        ColumnMappingConfig::none()
+        ColumnMappingConfig::default()
     }
 }
 

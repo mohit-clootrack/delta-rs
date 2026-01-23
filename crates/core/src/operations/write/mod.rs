@@ -47,7 +47,7 @@ use tracing::Instrument;
 use url::Url;
 
 pub use self::configs::WriterStatsConfig;
-use self::execution::{prepare_predicate_actions, write_execution_plan_v2, write_execution_plan_v3};
+use self::execution::{prepare_predicate_actions, write_execution_plan_v3};
 use self::generated_columns::{gc_is_enabled, with_generated_columns};
 use self::metrics::{SOURCE_COUNT_ID, SOURCE_COUNT_METRIC};
 use self::schema_evolution::try_cast_schema;
