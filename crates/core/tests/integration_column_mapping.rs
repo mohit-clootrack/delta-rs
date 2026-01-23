@@ -1044,3 +1044,271 @@ async fn test_merge_schema_evolution_with_column_mapping() -> TestResult {
 
     Ok(())
 }
+
+/// Test MERGE with column mapping using column names with special characters (spaces)
+/// This is a common use case for column mapping - allowing column names that aren't valid in Parquet
+#[tokio::test]
+async fn test_merge_with_special_column_names_and_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled and column names containing spaces
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("user id", DataType::STRING, false),
+            StructField::new("total value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Verify column mapping is enabled and columns have physical names
+    let schema = table.snapshot()?.schema();
+    for field in schema.fields() {
+        assert!(
+            field.metadata().contains_key("delta.columnMapping.physicalName"),
+            "Field {} should have physical name mapping",
+            field.name()
+        );
+        let physical_name = field.metadata().get("delta.columnMapping.physicalName")
+            .expect("Should have physical name");
+        if let delta_kernel::schema::MetadataValue::String(pn) = physical_name {
+            assert!(
+                pn.starts_with("col-"),
+                "Physical name for '{}' should start with 'col-', got: {}",
+                field.name(), pn
+            );
+        }
+    }
+
+    // Write initial data: "A"=100, "B"=200
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("user id", ArrowDataType::Utf8, false),
+        ArrowField::new("total value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Verify initial data using query (column names with spaces need quotes)
+    let ctx = create_session().into_inner();
+    let provider = table.table_provider().await?;
+    ctx.register_table("initial_table", provider)?;
+    let df = ctx.sql(r#"SELECT "user id", "total value" FROM initial_table ORDER BY "user id""#).await?;
+    let initial_batches = df.collect().await?;
+
+    let expected_initial = vec![
+        "+---------+-------------+",
+        "| user id | total value |",
+        "+---------+-------------+",
+        "| A       | 100         |",
+        "| B       | 200         |",
+        "+---------+-------------+",
+    ];
+    assert_batches_sorted_eq!(expected_initial, &initial_batches);
+
+    // Create source data for MERGE: Update A to 150, Insert C=300
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("user id", ArrowDataType::Utf8, false),
+        ArrowField::new("total value", ArrowDataType::Int32, true),
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "C"])),
+            Arc::new(Int32Array::from(vec![150, 300])),
+        ],
+    )?;
+
+    let merge_ctx = SessionContext::new();
+    let source_df = merge_ctx.read_batch(source_batch)?;
+
+    // Perform MERGE with column names containing spaces
+    // Use backticks to quote column names with spaces in the predicate
+    let (table, metrics) = table
+        .merge(source_df, col("target.`user id`").eq(col("source.`user id`")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .when_matched_update(|update| {
+            update.update("total value", col("source.`total value`"))
+        })?
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("user id", col("source.`user id`"))
+                .set("total value", col("source.`total value`"))
+        })?
+        .await?;
+
+    // Verify merge metrics
+    assert_eq!(metrics.num_target_rows_updated, 1, "Should update 1 row (A)");
+    assert_eq!(metrics.num_target_rows_inserted, 1, "Should insert 1 row (C)");
+    assert_eq!(metrics.num_target_rows_copied, 1, "Should copy 1 row (B)");
+
+    // Read back the data and verify it's correct
+    let ctx2 = create_session().into_inner();
+    let provider2 = table.table_provider().await?;
+    ctx2.register_table("merged_table", provider2)?;
+
+    let df2 = ctx2.sql(r#"SELECT "user id", "total value" FROM merged_table ORDER BY "user id""#).await?;
+    let result_batches = df2.collect().await?;
+
+    // Expected: A=150 (updated), B=200 (unchanged), C=300 (inserted)
+    let expected = vec![
+        "+---------+-------------+",
+        "| user id | total value |",
+        "+---------+-------------+",
+        "| A       | 150         |",
+        "| B       | 200         |",
+        "| C       | 300         |",
+        "+---------+-------------+",
+    ];
+    assert_batches_sorted_eq!(expected, &result_batches);
+
+    Ok(())
+}
+
+/// Test that MERGE with column mapping writes correct data that can be read back
+/// This test verifies the data values are correct after merge, not just that the operation succeeds
+#[tokio::test]
+async fn test_merge_data_verification_with_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::STRING, false),
+            StructField::new("value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data: A=100, B=200
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Verify initial data is correct
+    let ctx = create_session().into_inner();
+    let provider = table.table_provider().await?;
+    ctx.register_table("initial_table", provider)?;
+    let df = ctx.sql("SELECT id, value FROM initial_table ORDER BY id").await?;
+    let initial_batches = df.collect().await?;
+
+    let expected_initial = vec![
+        "+----+-------+",
+        "| id | value |",
+        "+----+-------+",
+        "| A  | 100   |",
+        "| B  | 200   |",
+        "+----+-------+",
+    ];
+    assert_batches_sorted_eq!(expected_initial, &initial_batches);
+
+    // Create source data for MERGE: Update A to 150, Insert C=300
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "C"])),  // A exists, C is new
+            Arc::new(Int32Array::from(vec![150, 300])),  // Update A to 150, insert C with 300
+        ],
+    )?;
+
+    let merge_ctx = SessionContext::new();
+    let source_df = merge_ctx.read_batch(source_batch)?;
+
+    // Perform MERGE: update matching rows, insert new rows
+    let (table, metrics) = table
+        .merge(source_df, col("target.id").eq(col("source.id")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .when_matched_update(|update| {
+            update.update("value", col("source.value"))
+        })?
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("id", col("source.id"))
+                .set("value", col("source.value"))
+        })?
+        .await?;
+
+    // Verify merge metrics
+    assert_eq!(metrics.num_target_rows_updated, 1, "Should update 1 row (A)");
+    assert_eq!(metrics.num_target_rows_inserted, 1, "Should insert 1 row (C)");
+    assert_eq!(metrics.num_target_rows_copied, 1, "Should copy 1 row (B)");
+
+    // Read back the data and verify it's correct
+    let ctx2 = create_session().into_inner();
+    let provider2 = table.table_provider().await?;
+    ctx2.register_table("merged_table", provider2)?;
+
+    let df2 = ctx2.sql("SELECT id, value FROM merged_table ORDER BY id").await?;
+    let result_batches = df2.collect().await?;
+
+    // Expected: A=150 (updated), B=200 (unchanged), C=300 (inserted)
+    let expected = vec![
+        "+----+-------+",
+        "| id | value |",
+        "+----+-------+",
+        "| A  | 150   |",
+        "| B  | 200   |",
+        "| C  | 300   |",
+        "+----+-------+",
+    ];
+    assert_batches_sorted_eq!(expected, &result_batches);
+
+    Ok(())
+}
