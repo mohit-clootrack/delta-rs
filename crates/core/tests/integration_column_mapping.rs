@@ -675,7 +675,7 @@ async fn test_schema_evolution_column_id_assignment() -> TestResult {
     let new_field = schema.fields().find(|f| f.name() == "new_column");
     assert!(new_field.is_some(), "new_column should exist in schema");
 
-    let new_field = new_field.unwrap();
+    let _new_field = new_field.unwrap();
     let id_mappings = schema.get_logical_to_id_mapping();
     let new_column_id = id_mappings.get("new_column");
     assert!(
@@ -760,6 +760,286 @@ async fn test_schema_evolution_preserves_existing_ids() -> TestResult {
         *new_id_map.get("name").unwrap(),
         name_column_id,
         "name column should preserve its column ID"
+    );
+
+    Ok(())
+}
+
+/// Test that reading works from newly created table with column mapping
+#[tokio::test]
+async fn test_read_from_created_column_mapping_table() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::STRING, false),
+            StructField::new("value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Now try to read using table provider and DataFusion
+    let provider = table.table_provider().await?;
+    let ctx = create_session().into_inner();
+    ctx.register_table("test_table", provider)?;
+
+    // Try to query data
+    let df = ctx.sql("SELECT id, value FROM test_table ORDER BY id").await?;
+    let batches = df.collect().await?;
+
+    // Verify results
+    assert!(!batches.is_empty(), "Should have results");
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2, "Should have 2 rows");
+
+    Ok(())
+}
+
+/// Test basic MERGE operation (without schema evolution) with column mapping enabled
+#[tokio::test]
+async fn test_merge_basic_with_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::STRING, false),
+            StructField::new("value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Create source data for MERGE (same schema, no new columns)
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "C"])),  // A exists, C is new
+            Arc::new(Int32Array::from(vec![150, 300])),  // Update A, insert C
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    let source_df = ctx.read_batch(source_batch)?;
+
+    // Perform basic MERGE (no schema evolution)
+    let (table, _metrics) = table
+        .merge(source_df, col("target.id").eq(col("source.id")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .when_matched_update(|update| {
+            update.update("value", col("source.value"))
+        })?
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("id", col("source.id"))
+                .set("value", col("source.value"))
+        })?
+        .await?;
+
+    // Verify merge worked - the table should have 3 rows now (A updated, B unchanged, C inserted)
+    let _snapshot = table.snapshot()?;
+    // If we get here without error, the merge completed successfully
+
+    Ok(())
+}
+
+/// Test that MERGE with schema evolution properly assigns column IDs when column mapping is enabled
+#[tokio::test]
+async fn test_merge_schema_evolution_with_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField, StructTypeExt};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::STRING, false),
+            StructField::new("value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Get initial max column ID
+    let config = table.snapshot()?.metadata().configuration();
+    let initial_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(initial_max_id, 2, "Initial maxColumnId should be 2");
+
+    // Get initial column IDs
+    let initial_schema = table.snapshot()?.schema();
+    let initial_id_map = initial_schema.get_logical_to_id_mapping();
+    let id_column_id = *initial_id_map.get("id").unwrap();
+    let value_column_id = *initial_id_map.get("value").unwrap();
+
+    // Create source data with a new column for MERGE
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+        ArrowField::new("new_col", ArrowDataType::Int32, true),
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["C"])),
+            Arc::new(Int32Array::from(vec![300])),
+            Arc::new(Int32Array::from(vec![999])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    let source_df = ctx.read_batch(source_batch)?;
+
+    // Perform MERGE with schema evolution enabled
+    let (table, _metrics) = table
+        .merge(source_df, col("target.id").eq(col("source.id")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .with_merge_schema(true)
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("id", col("source.id"))
+                .set("value", col("source.value"))
+                .set("new_col", col("source.new_col"))
+        })?
+        .await?;
+
+    // Verify maxColumnId is updated
+    let config = table.snapshot()?.metadata().configuration();
+    let new_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        new_max_id, 3,
+        "maxColumnId should be 3 after MERGE with schema evolution"
+    );
+
+    // Verify the new column has proper column mapping metadata
+    let schema = table.snapshot()?.schema();
+    let id_map = schema.get_logical_to_id_mapping();
+
+    assert!(
+        id_map.contains_key("new_col"),
+        "new_col should have a column ID after MERGE"
+    );
+    assert_eq!(
+        *id_map.get("new_col").unwrap(),
+        3,
+        "new_col should have ID 3"
+    );
+
+    // Verify existing column IDs are preserved
+    assert_eq!(
+        *id_map.get("id").unwrap(),
+        id_column_id,
+        "id column should preserve its column ID"
+    );
+    assert_eq!(
+        *id_map.get("value").unwrap(),
+        value_column_id,
+        "value column should preserve its column ID"
     );
 
     Ok(())

@@ -76,8 +76,8 @@ use crate::delta_datafusion::logical::MetricObserver;
 use crate::delta_datafusion::physical::{MetricObserverExec, find_metric_node, get_metric};
 use crate::delta_datafusion::planner::DeltaPlanner;
 use crate::delta_datafusion::{
-    DataFusionMixins, DeltaColumn, DeltaScan, DeltaScanConfigBuilder, DeltaSessionContext,
-    DeltaTableProvider, register_store,
+    DataFusionMixins, DeltaColumn, DeltaScanConfig, DeltaScanExec, DeltaScanNext,
+    DeltaSessionContext, register_store,
 };
 use crate::kernel::schema::cast::{merge_arrow_field, merge_arrow_schema};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
@@ -826,15 +826,28 @@ async fn execute(
         }),
     });
 
-    let scan_config = DeltaScanConfigBuilder::default()
-        .with_file_column(true)
-        .with_parquet_pushdown(false)
-        .with_schema(snapshot.input_schema())
-        .build(&snapshot)?;
+    // Use the new kernel-based DeltaScan provider which properly handles column mapping
+    // Generate file column name that doesn't conflict with existing columns
+    let file_column_name = {
+        let input_schema = snapshot.input_schema();
+        let column_names: std::collections::HashSet<&String> =
+            input_schema.fields.iter().map(|f| f.name()).collect();
+        let prefix = "__delta_rs_path";
+        let mut idx = 0;
+        let mut name = prefix.to_owned();
+        while column_names.contains(&name) {
+            idx += 1;
+            name = format!("{prefix}_{idx}");
+        }
+        name
+    };
 
-    let target_provider = Arc::new(DeltaTableProvider::try_new(
-        snapshot.clone(),
-        log_store.clone(),
+    let scan_config = DeltaScanConfig::new()
+        .with_file_column_name(file_column_name.clone())
+        .with_parquet_pushdown(false);
+
+    let target_provider = Arc::new(DeltaScanNext::new(
+        snapshot.snapshot().clone(),
         scan_config.clone(),
     )?);
 
@@ -984,10 +997,45 @@ async fn execute(
         new_schema = Some(schema.clone());
         let schema_struct: StructType = schema.try_into_kernel()?;
         if &schema_struct != snapshot.schema().as_ref() {
+            let mut configuration = snapshot.metadata().configuration().clone();
+
+            // Handle column mapping metadata for new fields during schema evolution
+            let column_mapping_mode = snapshot.snapshot().table_configuration().column_mapping_mode();
+            let schema_struct =
+                if column_mapping_mode != delta_kernel::table_features::ColumnMappingMode::None {
+                    // First, copy existing column mapping metadata from the table schema
+                    // to the new schema for fields that exist in both
+                    let schema_with_existing_metadata = schema_struct
+                        .with_column_mapping_metadata_from_schema(snapshot.schema().as_ref())?;
+
+                    // Get the current max column ID from configuration, or from schema
+                    let current_max_id = configuration
+                        .get("delta.columnMapping.maxColumnId")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .or_else(|| snapshot.schema().get_max_column_id())
+                        .unwrap_or(0);
+
+                    // Add column mapping metadata to new fields (those without existing metadata)
+                    let (schema_with_mapping, new_max_id) = schema_with_existing_metadata
+                        .with_column_mapping_metadata_for_new_fields(current_max_id + 1)?;
+
+                    // Update maxColumnId in configuration if new IDs were assigned
+                    if new_max_id > current_max_id {
+                        configuration.insert(
+                            "delta.columnMapping.maxColumnId".to_string(),
+                            new_max_id.to_string(),
+                        );
+                    }
+
+                    schema_with_mapping
+                } else {
+                    schema_struct
+                };
+
             let action = Action::Metadata(new_metadata(
                 &schema_struct,
                 current_metadata.partition_columns(),
-                snapshot.metadata().configuration(),
+                configuration,
             )?);
             schema_action = Some(action);
         }
@@ -1387,7 +1435,7 @@ async fn execute(
     let source_count = find_metric_node(SOURCE_COUNT_ID, &write).ok_or_else(err)?;
     let op_count = find_metric_node(OUTPUT_COUNT_ID, &write).ok_or_else(err)?;
     let barrier = find_node::<MergeBarrierExec>(&write).ok_or_else(err)?;
-    let scan_count = find_node::<DeltaScan>(&write).ok_or_else(err)?;
+    let scan_count = find_node::<DeltaScanExec>(&write).ok_or_else(err)?;
 
     let table_partition_cols = current_metadata.partition_columns().clone();
 
