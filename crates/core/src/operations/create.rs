@@ -312,10 +312,11 @@ impl CreateBuilder {
 
         // Create schema, adding column mapping metadata if enabled
         let schema = StructType::try_new(self.columns)?;
-        let schema = if column_mapping_enabled {
-            schema.with_column_mapping_metadata()?
+        let (schema, max_column_id) = if column_mapping_enabled {
+            let (schema, max_id) = schema.with_column_mapping_metadata_from(1)?;
+            (schema, Some(max_id))
         } else {
-            schema
+            (schema, None)
         };
 
         // Apply protocol settings, enabling column mapping feature if needed
@@ -329,6 +330,18 @@ impl CreateBuilder {
             let inner = ProtocolInner::from_kernel(&protocol);
             protocol = inner.enable_column_mapping().as_kernel();
         }
+
+        // Add maxColumnId to configuration if column mapping is enabled
+        let configuration = if let Some(max_id) = max_column_id {
+            let mut config = configuration;
+            config.insert(
+                "delta.columnMapping.maxColumnId".to_string(),
+                max_id.to_string(),
+            );
+            config
+        } else {
+            configuration
+        };
 
         let mut metadata = new_metadata(
             &schema,

@@ -569,7 +569,45 @@ impl std::future::IntoFuture for WriteBuilder {
                         // Verify if delta schema changed
                         if &schema_struct != snapshot.schema().as_ref() {
                             let current_protocol = snapshot.protocol();
-                            let configuration = snapshot.metadata().configuration().clone();
+                            let mut configuration = snapshot.metadata().configuration().clone();
+
+                            // Handle column mapping metadata for new fields during schema evolution
+                            let column_mapping_mode =
+                                snapshot.snapshot().table_configuration().column_mapping_mode();
+                            let schema_struct =
+                                if column_mapping_mode != delta_kernel::table_features::ColumnMappingMode::None
+                                {
+                                    // First, copy existing column mapping metadata from the table schema
+                                    // to the new schema for fields that exist in both
+                                    let schema_with_existing_metadata = schema_struct
+                                        .with_column_mapping_metadata_from_schema(snapshot.schema().as_ref())?;
+
+                                    // Get the current max column ID from configuration, or from schema
+                                    let current_max_id = configuration
+                                        .get("delta.columnMapping.maxColumnId")
+                                        .and_then(|s| s.parse::<i64>().ok())
+                                        .or_else(|| snapshot.schema().get_max_column_id())
+                                        .unwrap_or(0);
+
+                                    // Add column mapping metadata to new fields (those without existing metadata)
+                                    let (schema_with_mapping, new_max_id) = schema_with_existing_metadata
+                                        .with_column_mapping_metadata_for_new_fields(
+                                            current_max_id + 1,
+                                        )?;
+
+                                    // Update maxColumnId in configuration if new IDs were assigned
+                                    if new_max_id > current_max_id {
+                                        configuration.insert(
+                                            "delta.columnMapping.maxColumnId".to_string(),
+                                            new_max_id.to_string(),
+                                        );
+                                    }
+
+                                    schema_with_mapping
+                                } else {
+                                    schema_struct
+                                };
+
                             let new_protocol = current_protocol
                                 .clone()
                                 .apply_column_metadata_to_protocol(&schema_struct)?

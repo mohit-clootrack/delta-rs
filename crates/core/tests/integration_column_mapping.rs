@@ -556,3 +556,211 @@ async fn test_full_roundtrip_with_column_mapping() -> TestResult {
 
     Ok(())
 }
+
+// =============================================================================
+// maxColumnId Tracking Tests
+// =============================================================================
+
+/// Test that maxColumnId is properly set when creating a table with column mapping
+#[tokio::test]
+async fn test_max_column_id_on_create() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::INTEGER, false),
+            StructField::new("name", DataType::STRING, true),
+            StructField::new("value", DataType::DOUBLE, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Verify maxColumnId is set in configuration
+    let config = table.snapshot()?.metadata().configuration();
+    let max_column_id = config.get("delta.columnMapping.maxColumnId");
+
+    assert!(
+        max_column_id.is_some(),
+        "maxColumnId should be set in table configuration"
+    );
+
+    let max_id: i64 = max_column_id.unwrap().parse()?;
+    assert_eq!(
+        max_id, 3,
+        "maxColumnId should be 3 for a table with 3 columns"
+    );
+
+    Ok(())
+}
+
+/// Test that schema evolution properly assigns new column IDs
+#[tokio::test]
+async fn test_schema_evolution_column_id_assignment() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::operations::write::WriteBuilder;
+    use deltalake_core::operations::write::SchemaMode;
+    use deltalake_core::kernel::{DataType, StructField, StructTypeExt};
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::INTEGER, false),
+            StructField::new("name", DataType::STRING, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Verify initial maxColumnId
+    let config = table.snapshot()?.metadata().configuration();
+    let initial_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(initial_max_id, 2, "Initial maxColumnId should be 2");
+
+    // Write data with a new column (schema evolution)
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Int32, false),
+        ArrowField::new("name", ArrowDataType::Utf8, true),
+        ArrowField::new("new_column", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .with_schema_mode(SchemaMode::Merge)
+    .await?;
+
+    // Verify maxColumnId is updated
+    let config = table.snapshot()?.metadata().configuration();
+    let new_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        new_max_id, 3,
+        "maxColumnId should be 3 after adding one new column"
+    );
+
+    // Verify the new column has proper column mapping metadata
+    let schema = table.snapshot()?.schema();
+    let new_field = schema.fields().find(|f| f.name() == "new_column");
+    assert!(new_field.is_some(), "new_column should exist in schema");
+
+    let new_field = new_field.unwrap();
+    let id_mappings = schema.get_logical_to_id_mapping();
+    let new_column_id = id_mappings.get("new_column");
+    assert!(
+        new_column_id.is_some(),
+        "new_column should have a column ID"
+    );
+    assert_eq!(
+        *new_column_id.unwrap(),
+        3,
+        "new_column should have ID 3"
+    );
+
+    Ok(())
+}
+
+/// Test that column mapping metadata is preserved for existing fields during schema evolution
+#[tokio::test]
+async fn test_schema_evolution_preserves_existing_ids() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::operations::write::WriteBuilder;
+    use deltalake_core::operations::write::SchemaMode;
+    use deltalake_core::kernel::{DataType, StructField, StructTypeExt};
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::INTEGER, false),
+            StructField::new("name", DataType::STRING, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Get initial column IDs
+    let initial_schema = table.snapshot()?.schema();
+    let initial_id_map = initial_schema.get_logical_to_id_mapping();
+    let id_column_id = *initial_id_map.get("id").unwrap();
+    let name_column_id = *initial_id_map.get("name").unwrap();
+
+    // Write data with a new column (schema evolution)
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Int32, false),
+        ArrowField::new("name", ArrowDataType::Utf8, true),
+        ArrowField::new("new_column", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(vec![1])),
+            Arc::new(StringArray::from(vec!["Test"])),
+            Arc::new(Int32Array::from(vec![42])),
+        ],
+    )?;
+
+    let table = WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .with_schema_mode(SchemaMode::Merge)
+    .await?;
+
+    // Verify existing column IDs are preserved
+    let new_schema = table.snapshot()?.schema();
+    let new_id_map = new_schema.get_logical_to_id_mapping();
+
+    assert_eq!(
+        *new_id_map.get("id").unwrap(),
+        id_column_id,
+        "id column should preserve its column ID"
+    );
+    assert_eq!(
+        *new_id_map.get("name").unwrap(),
+        name_column_id,
+        "name column should preserve its column ID"
+    );
+
+    Ok(())
+}
