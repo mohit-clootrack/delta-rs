@@ -847,7 +847,7 @@ async fn execute(
         .with_parquet_pushdown(false);
 
     let target_provider = Arc::new(DeltaScanNext::new(
-        snapshot.snapshot().clone(),
+        snapshot.clone(),
         scan_config.clone(),
     )?);
 
@@ -1467,7 +1467,13 @@ async fn execute(
 
     {
         for action in snapshot.log_data() {
-            if survivors.contains(action.path().as_ref()) {
+            let action_path = action.path();
+            // Check if any survivor path matches this action's path
+            // Survivors may contain full URLs (file:///path/to/file.parquet) or relative paths
+            // action.path() returns relative paths like "part-00000.parquet"
+            let is_survivor = survivors.contains(action_path.as_ref())
+                || survivors.iter().any(|s| s.ends_with(action_path.as_ref()));
+            if is_survivor {
                 metrics.num_target_files_removed += 1;
                 actions.push(action.remove_action(true).into());
             }
