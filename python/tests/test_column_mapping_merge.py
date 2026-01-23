@@ -13,11 +13,6 @@ class TestMergeWithColumnMapping:
     def test_merge_update_all_with_column_mapping(self, tmp_path):
         """Test that when_matched_update_all works correctly with column mapping."""
         # Create a table with column mapping enabled
-        schema = pa.schema([
-            pa.field("id", pa.string()),
-            pa.field("value", pa.int64()),
-        ])
-
         initial_data = pa.table({
             "id": ["A", "B", "C"],
             "value": [100, 200, 300],
@@ -27,7 +22,6 @@ class TestMergeWithColumnMapping:
             tmp_path,
             initial_data,
             mode="overwrite",
-            schema=schema,
             configuration={
                 "delta.columnMapping.mode": "name",
             },
@@ -286,7 +280,7 @@ class TestMergeWithColumnMapping:
             predicate="target.id = source.id",
             source_alias="source",
             target_alias="target",
-            schema_evolution_mode="merge",  # Enable schema evolution
+            merge_schema=True,  # Enable schema evolution
         ).when_not_matched_insert_all().execute()
 
         # Reload and check the schema
