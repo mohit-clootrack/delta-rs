@@ -86,7 +86,7 @@ use crate::logstore::LogStoreRef;
 use crate::operations::cdc::*;
 use crate::operations::merge::barrier::find_node;
 use crate::operations::write::WriterStatsConfig;
-use crate::operations::write::execution::write_execution_plan_v2;
+use crate::operations::write::execution::write_execution_plan_v3;
 use crate::operations::write::generated_columns::{
     add_generated_columns, add_missing_generated_columns, gc_is_enabled,
 };
@@ -961,6 +961,8 @@ async fn execute(
     // this avoid the side effect of adding unnecessary columns (eg. target.id = source.ID) "ID" will not be added since "id" exist in target and end user intended it to be "id"
     let mut new_schema = None;
     let mut schema_action = None;
+    // Store the evolved schema with column mapping metadata for use in write_execution_plan
+    let mut evolved_schema_with_column_mapping: Option<StructType> = None;
     if merge_schema {
         let merge_schema = merge_arrow_schema(
             snapshot.input_schema(),
@@ -1023,6 +1025,9 @@ async fn execute(
                             new_max_id.to_string(),
                         );
                     }
+
+                    // Store the evolved schema for use in write_execution_plan
+                    evolved_schema_with_column_mapping = Some(schema_with_mapping.clone());
 
                     schema_with_mapping
                 } else {
@@ -1437,7 +1442,7 @@ async fn execute(
     let table_partition_cols = current_metadata.partition_columns().clone();
     let writer_stats_config = WriterStatsConfig::from_config(snapshot.table_configuration());
 
-    let (mut actions, write_plan_metrics) = write_execution_plan_v2(
+    let (mut actions, write_plan_metrics) = write_execution_plan_v3(
         Some(&snapshot),
         &state,
         write,
@@ -1449,6 +1454,8 @@ async fn execute(
         writer_stats_config.clone(),
         None,
         should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
+        // Pass the evolved schema with column mapping for new columns (if any)
+        evolved_schema_with_column_mapping.as_ref(),
     )
     .await?;
     if let Some(schema_metadata) = schema_action {

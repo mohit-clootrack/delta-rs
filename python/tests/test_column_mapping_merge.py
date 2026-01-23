@@ -242,6 +242,95 @@ class TestMergeWithColumnMapping:
         assert result.column("total value").to_pylist() == [150, 200, 300], \
             f"total value values don't match. Got: {result.column('total value').to_pylist()}"
 
+    def test_autoschema_merge_with_column_mapping(self, tmp_path):
+        """Test merge with merge_schema=True (autoschema) and column mapping.
+
+        This tests the scenario where source has new columns that need to be
+        added to the target table during merge (schema evolution).
+        """
+        # Create a table with column mapping enabled and 2 columns
+        initial_data = pa.table({
+            "id": ["A", "B"],
+            "value": [100, 200],
+        })
+
+        write_deltalake(
+            tmp_path,
+            initial_data,
+            mode="overwrite",
+            configuration={
+                "delta.columnMapping.mode": "name",
+            },
+        )
+
+        dt = DeltaTable(tmp_path)
+
+        # Verify initial schema has 2 columns with proper column mapping
+        delta_schema = dt.schema()
+        assert len(delta_schema.fields) == 2, "Initial table should have 2 columns"
+
+        initial_max_id = int(dt.metadata().configuration.get("delta.columnMapping.maxColumnId", "0"))
+        assert initial_max_id == 2, f"Initial maxColumnId should be 2, got {initial_max_id}"
+
+        # Create source data with a NEW column (new_col)
+        source_data = pa.table({
+            "id": ["C", "D"],  # New rows
+            "value": [300, 400],
+            "new_col": [999, 888],  # NEW column not in target
+        })
+
+        # Perform merge with schema evolution enabled (autoschema)
+        # This should add the new_col to the target schema
+        dt.merge(
+            source=source_data,
+            predicate="target.id = source.id",
+            source_alias="source",
+            target_alias="target",
+            schema_evolution_mode="merge",  # Enable schema evolution
+        ).when_not_matched_insert_all().execute()
+
+        # Reload and check the schema
+        dt = DeltaTable(tmp_path)
+        delta_schema = dt.schema()
+
+        # Verify the new column was added
+        field_names = [f.name for f in delta_schema.fields]
+        assert "new_col" in field_names, f"new_col should be added to schema. Got: {field_names}"
+
+        # Verify new column has proper column mapping metadata
+        new_col_field = next(f for f in delta_schema.fields if f.name == "new_col")
+        assert "delta.columnMapping.physicalName" in new_col_field.metadata, \
+            "new_col should have physical name mapping"
+        assert "delta.columnMapping.id" in new_col_field.metadata, \
+            "new_col should have column ID"
+
+        # Verify maxColumnId was incremented
+        new_max_id = int(dt.metadata().configuration.get("delta.columnMapping.maxColumnId", "0"))
+        assert new_max_id == 3, f"maxColumnId should be 3 after adding new column, got {new_max_id}"
+
+        # Verify the new column ID is correct
+        new_col_id = int(new_col_field.metadata["delta.columnMapping.id"])
+        assert new_col_id == 3, f"new_col should have ID 3, got {new_col_id}"
+
+        # Read back the data
+        result = dt.to_pyarrow_table()
+        result = result.sort_by("id")
+
+        # Verify data is correct
+        # A and B should have NULL for new_col (not matched)
+        # C and D should have values for all columns
+        assert result.column("id").to_pylist() == ["A", "B", "C", "D"], \
+            f"IDs don't match. Got: {result.column('id').to_pylist()}"
+        assert result.column("value").to_pylist() == [100, 200, 300, 400], \
+            f"Values don't match. Got: {result.column('value').to_pylist()}"
+
+        # new_col should be NULL for A and B, and have values for C and D
+        new_col_values = result.column("new_col").to_pylist()
+        assert new_col_values[0] is None, f"A should have NULL for new_col, got {new_col_values[0]}"
+        assert new_col_values[1] is None, f"B should have NULL for new_col, got {new_col_values[1]}"
+        assert new_col_values[2] == 999, f"C should have 999 for new_col, got {new_col_values[2]}"
+        assert new_col_values[3] == 888, f"D should have 888 for new_col, got {new_col_values[3]}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1451,3 +1451,159 @@ async fn test_merge_data_verification_with_column_mapping() -> TestResult {
 
     Ok(())
 }
+
+/// Test MERGE with schema evolution (autoschema) and column mapping enabled.
+/// This tests the scenario where source has new columns that need to be
+/// added to the target table during merge - verifying both schema changes and data.
+#[tokio::test]
+async fn test_autoschema_merge_with_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField, StructTypeExt};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with column mapping enabled and 2 columns
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("id", DataType::STRING, false),
+            StructField::new("value", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data: A=100, B=200
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["A", "B"])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Verify initial maxColumnId is 2
+    let config = table.snapshot()?.metadata().configuration();
+    let initial_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(initial_max_id, 2, "Initial maxColumnId should be 2");
+
+    // Create source data with a NEW column (new_col)
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", ArrowDataType::Utf8, false),
+        ArrowField::new("value", ArrowDataType::Int32, true),
+        ArrowField::new("new_col", ArrowDataType::Int32, true),  // NEW column
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["C", "D"])),  // New rows
+            Arc::new(Int32Array::from(vec![300, 400])),
+            Arc::new(Int32Array::from(vec![999, 888])),  // Values for new column
+        ],
+    )?;
+
+    let merge_ctx = SessionContext::new();
+    let source_df = merge_ctx.read_batch(source_batch)?;
+
+    // Perform MERGE with schema evolution enabled (autoschema)
+    // This should add the new_col to the target schema
+    let (table, _metrics) = table
+        .merge(source_df, col("target.id").eq(col("source.id")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .with_merge_schema(true)  // Enable schema evolution
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("id", col("source.id"))
+                .set("value", col("source.value"))
+                .set("new_col", col("source.new_col"))
+        })?
+        .await?;
+
+    // Verify maxColumnId was incremented
+    let config = table.snapshot()?.metadata().configuration();
+    let new_max_id: i64 = config
+        .get("delta.columnMapping.maxColumnId")
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        new_max_id, 3,
+        "maxColumnId should be 3 after adding new column"
+    );
+
+    // Verify the new column has proper column mapping metadata
+    let schema = table.snapshot()?.schema();
+    let id_map = schema.get_logical_to_id_mapping();
+
+    assert!(
+        id_map.contains_key("new_col"),
+        "new_col should have a column ID"
+    );
+    assert_eq!(
+        *id_map.get("new_col").unwrap(),
+        3,
+        "new_col should have ID 3"
+    );
+
+    // Verify physical name mapping exists for new column
+    let physical_map = schema.get_logical_to_physical_mapping();
+    assert!(
+        physical_map.contains_key("new_col"),
+        "new_col should have a physical name mapping"
+    );
+    let new_col_physical = physical_map.get("new_col").unwrap();
+    assert!(
+        new_col_physical.starts_with("col-"),
+        "Physical name for new_col should start with 'col-', got: {}",
+        new_col_physical
+    );
+
+    // Read back the data and verify it's correct
+    let ctx = create_session().into_inner();
+    let provider = table.table_provider().await?;
+    ctx.register_table("result_table", provider)?;
+
+    let df = ctx.sql("SELECT id, value, new_col FROM result_table ORDER BY id").await?;
+    let result_batches = df.collect().await?;
+
+    // Expected:
+    // A: 100, NULL (existing row, new_col didn't exist)
+    // B: 200, NULL (existing row, new_col didn't exist)
+    // C: 300, 999 (inserted with new_col value)
+    // D: 400, 888 (inserted with new_col value)
+    let expected = vec![
+        "+----+-------+---------+",
+        "| id | value | new_col |",
+        "+----+-------+---------+",
+        "| A  | 100   |         |",
+        "| B  | 200   |         |",
+        "| C  | 300   | 999     |",
+        "| D  | 400   | 888     |",
+        "+----+-------+---------+",
+    ];
+    assert_batches_sorted_eq!(expected, &result_batches);
+
+    Ok(())
+}
