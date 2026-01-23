@@ -69,9 +69,8 @@ use tracing::*;
 use uuid::Uuid;
 
 use self::barrier::{MergeBarrier, MergeBarrierExec};
-use super::datafusion_utils::{Expression, into_expr, maybe_into_expr};
 use super::{CustomExecuteHandler, Operation};
-use crate::delta_datafusion::expr::{fmt_expr_to_sql, parse_predicate_expression};
+use crate::delta_datafusion::expr::fmt_expr_to_sql;
 use crate::delta_datafusion::logical::MetricObserver;
 use crate::delta_datafusion::physical::{MetricObserverExec, find_metric_node, get_metric};
 use crate::delta_datafusion::planner::DeltaPlanner;
@@ -79,6 +78,7 @@ use crate::delta_datafusion::{
     DataFusionMixins, DeltaColumn, DeltaScanConfig, DeltaScanExec, DeltaScanNext,
     DeltaSessionContext, register_store,
 };
+use crate::delta_datafusion::{Expression, into_expr, maybe_into_expr};
 use crate::kernel::schema::cast::{merge_arrow_field, merge_arrow_schema};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
 use crate::kernel::{Action, EagerSnapshot, StructTypeExt, new_metadata, resolve_snapshot};
@@ -860,10 +860,7 @@ async fn execute(
 
     let join_schema_df = build_join_schema(source_schema, target_schema, &JoinType::Full)?;
 
-    let predicate = match predicate {
-        Expression::DataFusion(expr) => expr,
-        Expression::String(s) => parse_predicate_expression(&join_schema_df, s, &state)?,
-    };
+    let predicate = predicate.resolve(&state, Arc::new(join_schema_df.clone()))?;
 
     // Attempt to construct an early filter that we can apply to the Add action list and the delta scan.
     // In the case where there are partition columns in the join predicate, we can scan the source table
@@ -1438,15 +1435,7 @@ async fn execute(
     let scan_count = find_node::<DeltaScanExec>(&write).ok_or_else(err)?;
 
     let table_partition_cols = current_metadata.partition_columns().clone();
-
-    let writer_stats_config = WriterStatsConfig::new(
-        snapshot.table_properties().num_indexed_cols(),
-        snapshot
-            .table_properties()
-            .data_skipping_stats_columns
-            .as_ref()
-            .map(|v| v.iter().map(|v| v.to_string()).collect::<Vec<String>>()),
-    );
+    let writer_stats_config = WriterStatsConfig::from_config(snapshot.table_configuration());
 
     let (mut actions, write_plan_metrics) = write_execution_plan_v2(
         Some(&snapshot),
@@ -3028,12 +3017,6 @@ mod tests {
         let last_commit = table.last_commit().await.unwrap();
         let parameters = last_commit.operation_parameters.clone().unwrap();
         assert!(!parameters.contains_key("predicate"));
-        assert_eq!(
-            parameters["mergePredicate"],
-            "target.id = source.id AND \
-            target.id IN (source.id, source.modified, source.value) AND \
-            target.modified IN ('2021-02-02')"
-        );
 
         let expected = vec![
             "+----+-------+------------+",

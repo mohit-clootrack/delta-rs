@@ -2,20 +2,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::vec;
 
-use arrow::compute::concat_batches;
 use arrow::datatypes::Schema;
 use arrow_array::RecordBatch;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::ToDFSchema;
 use datafusion::datasource::{MemTable, provider_as_source};
-use datafusion::execution::SendableRecordBatchStream;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, col, lit, when};
 use datafusion::physical_plan::{ExecutionPlan, execute_stream_partitioned};
 use delta_kernel::engine::arrow_conversion::TryIntoKernel as _;
 use delta_kernel::table_features::ColumnMappingMode;
-use futures::StreamExt;
-use itertools::Itertools as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use object_store::prefix::PrefixStore;
 use parquet::file::properties::WriterProperties;
 use tokio::sync::mpsc;
@@ -26,7 +23,9 @@ use super::writer::{DeltaWriter, WriterConfig};
 use crate::DeltaTableError;
 use crate::delta_datafusion::{
     DataFusionMixins, DataValidationExec, DeltaScanConfigBuilder, DeltaTableProvider, find_files,
-    generated_columns_to_exprs, validation_predicates,
+    generated_columns_to_exprs,
+    logical::{LogicalPlanBuilderExt as _, LogicalPlanExt as _},
+    validation_predicates,
 };
 use crate::errors::DeltaResult;
 use crate::kernel::{Action, Add, AddCDCFile, EagerSnapshot, Remove, StructType, StructTypeExt};
@@ -52,6 +51,30 @@ fn channel_size() -> usize {
 pub(crate) struct WriteExecutionPlanMetrics {
     pub scan_time_ms: u64,
     pub write_time_ms: u64,
+}
+
+/// Column mapping configuration for write operations
+#[derive(Clone)]
+struct ColumnMappingConfig {
+    mode: ColumnMappingMode,
+    logical_to_physical: HashMap<String, String>,
+    logical_to_id: HashMap<String, i32>,
+}
+
+impl Default for ColumnMappingConfig {
+    fn default() -> Self {
+        Self {
+            mode: ColumnMappingMode::None,
+            logical_to_physical: HashMap::new(),
+            logical_to_id: HashMap::new(),
+        }
+    }
+}
+
+impl ColumnMappingConfig {
+    fn is_enabled(&self) -> bool {
+        self.mode != ColumnMappingMode::None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -189,16 +212,11 @@ pub(crate) async fn execute_non_empty_expr(
         // Only write when CDC actions when it was not a partition scan, load_cdf can deduce the deletes in that case
         // based on the remove actions if a partition got deleted
         if should_write_cdc(snapshot)? {
-            let mut projection = source
-                .schema()
-                .iter()
-                .map(|(_, field)| col(field.name()))
-                .collect_vec();
-            projection.push(lit("delete").alias(CDC_COLUMN_NAME));
             Some(
-                LogicalPlanBuilder::new_from_arc(source)
+                source
+                    .into_builder()
                     .filter(expression.clone())?
-                    .project(projection)?
+                    .with_column(CDC_COLUMN_NAME, lit("delete"))?
                     .build()?,
             )
         } else {
@@ -298,9 +316,8 @@ pub(crate) async fn write_execution_plan_v2(
 
 /// Version 3 of write_execution_plan that supports column mapping for new tables
 ///
-/// TODO: Consider refactoring to use a `WriteOptions` struct to group related parameters
-/// (target_file_size, write_batch_size, writer_properties, writer_stats_config) and reduce
-/// the number of function arguments.
+/// This function handles both existing tables (using snapshot for column mapping info)
+/// and new tables (using target_schema_with_column_mapping for column mapping metadata).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_execution_plan_v3(
     snapshot: Option<&EagerSnapshot>,
@@ -340,238 +357,309 @@ pub(crate) async fn write_execution_plan_v3(
 
     let plan = DataValidationExec::try_new_with_predicates(session, plan, validations)?;
 
-    // Get column mapping mode and build logical-to-physical name mapping and logical-to-id mapping
-    // Uses get_column_mappings() for efficient single traversal when both mappings are needed
-    let (column_mapping_mode, logical_to_physical, logical_to_id) = if let Some(snapshot) = snapshot {
+    // Get column mapping configuration from snapshot or target schema
+    let column_mapping = get_column_mapping_config(snapshot, target_schema_with_column_mapping);
+
+    if !contains_cdc {
+        write_data_plan(
+            session,
+            plan,
+            partition_columns,
+            object_store,
+            target_file_size,
+            write_batch_size,
+            writer_properties,
+            writer_stats_config,
+            column_mapping,
+        )
+        .await
+    } else {
+        write_cdc_plan(
+            session,
+            plan,
+            partition_columns,
+            object_store,
+            target_file_size,
+            write_batch_size,
+            writer_properties,
+            writer_stats_config,
+            column_mapping,
+        )
+        .await
+    }
+}
+
+/// Extract column mapping configuration from snapshot or target schema
+fn get_column_mapping_config(
+    snapshot: Option<&EagerSnapshot>,
+    target_schema_with_column_mapping: Option<&StructType>,
+) -> ColumnMappingConfig {
+    if let Some(snapshot) = snapshot {
         let mode = snapshot.table_configuration().column_mapping_mode();
         if mode == ColumnMappingMode::None {
-            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+            ColumnMappingConfig::default()
         } else {
             let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
-            (mode, physical_mapping, id_mapping)
+            ColumnMappingConfig {
+                mode,
+                logical_to_physical: physical_mapping,
+                logical_to_id: id_mapping,
+            }
         }
     } else if let Some(target_schema) = target_schema_with_column_mapping {
         // For new tables with column mapping, extract mappings from target schema metadata
         let (physical_mapping, id_mapping) = target_schema.get_column_mappings();
         if physical_mapping.is_empty() {
-            (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+            ColumnMappingConfig::default()
         } else {
-            (ColumnMappingMode::Name, physical_mapping, id_mapping)
+            ColumnMappingConfig {
+                mode: ColumnMappingMode::Name,
+                logical_to_physical: physical_mapping,
+                logical_to_id: id_mapping,
+            }
         }
     } else {
-        (ColumnMappingMode::None, HashMap::new(), HashMap::new())
+        ColumnMappingConfig::default()
+    }
+}
+
+/// Build a WriterConfig with common options and optional column mapping
+fn build_writer_config(
+    schema: Arc<Schema>,
+    partition_columns: Vec<String>,
+    writer_properties: Option<WriterProperties>,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_stats_config: &WriterStatsConfig,
+    column_mapping: &ColumnMappingConfig,
+) -> WriterConfig {
+    let mut config = WriterConfig::new(
+        schema,
+        partition_columns,
+        writer_stats_config.num_indexed_cols,
+    );
+    if let Some(props) = writer_properties {
+        config = config.with_writer_properties(props);
+    }
+    if let Some(size) = target_file_size {
+        config = config.with_target_file_size(size);
+    }
+    if let Some(size) = write_batch_size {
+        config = config.with_write_batch_size(size);
+    }
+    if let Some(columns) = writer_stats_config.stats_columns.clone() {
+        config = config.with_stats_columns(columns);
+    }
+    if column_mapping.is_enabled() {
+        config = config.with_column_mapping(
+            column_mapping.mode,
+            column_mapping.logical_to_physical.clone(),
+            column_mapping.logical_to_id.clone(),
+        );
+    }
+    config
+}
+
+/// Write data without CDC - drives partition streams concurrently via mpsc channel
+#[allow(clippy::too_many_arguments)]
+async fn write_data_plan(
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+    column_mapping: ColumnMappingConfig,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    let config = build_writer_config(
+        plan.schema().clone(),
+        partition_columns,
+        writer_properties,
+        target_file_size,
+        write_batch_size,
+        &writer_stats_config,
+        &column_mapping,
+    );
+
+    // sync channel for batches produced by partition stream
+    let (tx, mut rx) = mpsc::channel::<RecordBatch>(channel_size());
+
+    let writer_handle = tokio::task::spawn(async move {
+        let mut writer = DeltaWriter::new(object_store.clone(), config);
+        let mut total_write_ms: u64 = 0;
+        while let Some(batch) = rx.recv().await {
+            let wstart = std::time::Instant::now();
+            writer.write(&batch).await?;
+            total_write_ms += wstart.elapsed().as_millis() as u64;
+        }
+        let adds = writer.close().await?;
+        Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
+    });
+
+    // spawn one worker per partition stream to drive DataFusion concurrently
+    let partition_streams = execute_stream_partitioned(plan, session.task_ctx())?;
+    let mut worker_handles = Vec::with_capacity(partition_streams.len());
+    let scan_start = std::time::Instant::now();
+    for mut partition_stream in partition_streams {
+        let tx_clone = tx.clone();
+        let handle = tokio::task::spawn(async move {
+            while let Some(maybe_batch) = partition_stream.next().await {
+                let batch = maybe_batch?;
+                tx_clone.send(batch).await.map_err(|_| {
+                    DeltaTableError::Generic("Writer task closed unexpectedly".to_string())
+                })?;
+            }
+            Ok::<(), DeltaTableError>(())
+        });
+        worker_handles.push(handle);
+    }
+
+    drop(tx);
+
+    let join_res = writer_handle
+        .await
+        .map_err(|e| DeltaTableError::Generic(format!("writer join error: {}", e)))?;
+    let (adds, write_time_ms) = join_res?;
+
+    for h in worker_handles {
+        let join_res = h.await.map_err(|e| {
+            DeltaTableError::Generic(format!("worker join error when driving partition: {}", e))
+        })?;
+        join_res?;
+    }
+
+    let write_elapsed = write_time_ms;
+    let scan_time_ms = scan_start.elapsed().as_millis() as u64;
+    let scan_time_ms = scan_time_ms.saturating_sub(write_elapsed);
+
+    let metrics = WriteExecutionPlanMetrics {
+        scan_time_ms,
+        write_time_ms: write_elapsed,
     };
 
-    // Write data to disk
-    // We drive partition streams concurrently and centralize writes via an mpsc channel.
-    if !contains_cdc {
-        let mut config = WriterConfig::new(
-            schema.clone(),
-            partition_columns.clone(),
-            writer_stats_config.num_indexed_cols,
-        );
-        if let Some(props) = writer_properties.clone() {
-            config = config.with_writer_properties(props);
-        }
-        if let Some(size) = target_file_size {
-            config = config.with_target_file_size(size);
-        }
-        if let Some(size) = write_batch_size {
-            config = config.with_write_batch_size(size);
-        }
-        if let Some(columns) = writer_stats_config.stats_columns.clone() {
-            config = config.with_stats_columns(columns);
-        }
-        if column_mapping_mode != ColumnMappingMode::None {
-            config = config.with_column_mapping(
-                column_mapping_mode,
-                logical_to_physical,
-                logical_to_id.clone(),
-            );
-        }
+    let actions = adds.into_iter().map(Action::Add).collect::<Vec<_>>();
+    Ok((actions, metrics))
+}
 
-        let partition_streams: Vec<SendableRecordBatchStream> =
-            execute_stream_partitioned(plan, session.task_ctx())?;
+/// Write data with CDC - creates two writer tasks (normal + cdf) and drives partition streams concurrently
+#[allow(clippy::too_many_arguments)]
+async fn write_cdc_plan(
+    session: &dyn Session,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+    column_mapping: ColumnMappingConfig,
+) -> DeltaResult<(Vec<Action>, WriteExecutionPlanMetrics)> {
+    let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), "_change_data"));
 
-        // sync channel for batches produced by partition stream
-        let (tx, mut rx) = mpsc::channel::<RecordBatch>(channel_size());
-
-        let writer_handle = tokio::task::spawn(async move {
-            let mut writer = DeltaWriter::new(object_store.clone(), config);
-            let mut total_write_ms: u64 = 0;
-            while let Some(batch) = rx.recv().await {
-                let wstart = std::time::Instant::now();
-                writer.write(&batch).await?;
-                total_write_ms += wstart.elapsed().as_millis() as u64;
-            }
-            let adds = writer.close().await?;
-            Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
-        });
-
-        // spawn one worker per partition stream to drive DataFusion concurrently
-        let mut worker_handles = Vec::with_capacity(partition_streams.len());
-        let scan_start = std::time::Instant::now();
-        for mut partition_stream in partition_streams {
-            let tx_clone = tx.clone();
-            let handle = tokio::task::spawn(async move {
-                while let Some(maybe_batch) = partition_stream.next().await {
-                    let batch = maybe_batch?;
-                    tx_clone.send(batch).await.map_err(|_| {
-                        DeltaTableError::Generic("Writer task closed unexpectedly".to_string())
-                    })?;
+    let write_schema = Arc::new(Schema::new(
+        plan.schema()
+            .clone()
+            .fields()
+            .into_iter()
+            .filter_map(|f| {
+                if f.name() != CDC_COLUMN_NAME {
+                    Some(f.as_ref().clone())
+                } else {
+                    None
                 }
-                Ok::<(), DeltaTableError>(())
-            });
-            worker_handles.push(handle);
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let cdf_schema = plan.schema().clone();
+
+    let normal_config = build_writer_config(
+        write_schema.clone(),
+        partition_columns.clone(),
+        writer_properties.clone(),
+        target_file_size,
+        write_batch_size,
+        &writer_stats_config,
+        &column_mapping,
+    );
+
+    let cdf_config = build_writer_config(
+        cdf_schema.clone(),
+        partition_columns,
+        writer_properties,
+        target_file_size,
+        write_batch_size,
+        &writer_stats_config,
+        &column_mapping,
+    );
+
+    // sync channel for batches produced by partition stream for normal and cdf batches
+    let (tx_normal, mut rx_normal) = mpsc::channel::<RecordBatch>(channel_size());
+    let (tx_cdf, mut rx_cdf) = mpsc::channel::<RecordBatch>(channel_size());
+
+    let normal_writer_handle = tokio::task::spawn(async move {
+        let mut writer = DeltaWriter::new(object_store, normal_config);
+        let mut total_write_ms: u64 = 0;
+        while let Some(batch) = rx_normal.recv().await {
+            let wstart = std::time::Instant::now();
+            writer.write(&batch).await?;
+            total_write_ms += wstart.elapsed().as_millis() as u64;
         }
+        let adds = writer.close().await?;
+        Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
+    });
 
-        drop(tx);
-
-        let join_res = writer_handle
-            .await
-            .map_err(|e| DeltaTableError::Generic(format!("writer join error: {}", e)))?;
-        let (adds, write_time_ms) = join_res?;
-
-        for h in worker_handles {
-            let join_res = h.await.map_err(|e| {
-                DeltaTableError::Generic(format!("worker join error when driving partition: {}", e))
-            })?;
-            join_res?;
+    let cdf_writer_handle = tokio::task::spawn(async move {
+        let mut writer = DeltaWriter::new(cdf_store, cdf_config);
+        let mut total_write_ms: u64 = 0;
+        while let Some(batch) = rx_cdf.recv().await {
+            let wstart = std::time::Instant::now();
+            writer.write(&batch).await?;
+            total_write_ms += wstart.elapsed().as_millis() as u64;
         }
+        let adds = writer.close().await?;
+        Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
+    });
 
-        let write_elapsed = write_time_ms;
-        let scan_time_ms = scan_start.elapsed().as_millis() as u64;
-        let scan_time_ms = scan_time_ms.saturating_sub(write_elapsed);
+    // spawn partition workers that split batches and send to appropriate writer channel
+    let partition_streams = execute_stream_partitioned(plan, session.task_ctx())?;
+    let mut worker_handles = Vec::with_capacity(partition_streams.len());
+    let scan_start = std::time::Instant::now();
+    for mut partition_stream in partition_streams {
+        let txn = tx_normal.clone();
+        let txc = tx_cdf.clone();
+        let session_ctx = SessionContext::new();
 
-        let metrics = WriteExecutionPlanMetrics {
-            scan_time_ms,
-            write_time_ms: write_elapsed,
-        };
+        let h = tokio::task::spawn(async move {
+            while let Some(maybe_batch) = partition_stream.next().await {
+                let batch = maybe_batch?;
 
-        let actions = adds.into_iter().map(Action::Add).collect::<Vec<_>>();
-        Ok((actions, metrics))
-    } else {
-        // CDC branch: create two writer tasks (normal + cdf) and drive partition streams concurrently
-        let cdf_store = Arc::new(PrefixStore::new(object_store.clone(), "_change_data"));
+                // split batch since upstream unioned write and cdf plans
+                let table_provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(
+                    batch.schema(),
+                    vec![vec![batch.clone()]],
+                )?);
+                let batch_df = session_ctx.read_table(table_provider).unwrap();
 
-        let write_schema = Arc::new(Schema::new(
-            schema
-                .clone()
-                .fields()
-                .into_iter()
-                .filter_map(|f| {
-                    if f.name() != CDC_COLUMN_NAME {
-                        Some(f.as_ref().clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>(),
-        ));
-        let cdf_schema = schema.clone();
+                let normal_df = batch_df.clone().filter(col(CDC_COLUMN_NAME).in_list(
+                    vec![lit("delete"), lit("source_delete"), lit("update_preimage")],
+                    true,
+                ))?;
 
-        // Helper to build writer config with common options
-        let build_config = |schema| {
-            let mut config = WriterConfig::new(
-                schema,
-                partition_columns.clone(),
-                writer_stats_config.num_indexed_cols,
-            );
-            if let Some(props) = writer_properties.clone() {
-                config = config.with_writer_properties(props);
-            }
-            if let Some(size) = target_file_size {
-                config = config.with_target_file_size(size);
-            }
-            if let Some(size) = write_batch_size {
-                config = config.with_write_batch_size(size);
-            }
-            if let Some(columns) = writer_stats_config.stats_columns.clone() {
-                config = config.with_stats_columns(columns);
-            }
-            if column_mapping_mode != ColumnMappingMode::None {
-                config = config.with_column_mapping(
-                    column_mapping_mode,
-                    logical_to_physical.clone(),
-                    logical_to_id.clone(),
-                );
-            }
-            config
-        };
+                let cdf_df = batch_df.filter(col(CDC_COLUMN_NAME).in_list(
+                    vec![
+                        lit("delete"),
+                        lit("insert"),
+                        lit("update_preimage"),
+                        lit("update_postimage"),
+                    ],
+                    false,
+                ))?;
 
-        let normal_config = build_config(write_schema.clone());
-        let cdf_config = build_config(cdf_schema.clone());
-
-        // partition streams
-        let partition_streams = execute_stream_partitioned(plan, session.task_ctx())?;
-
-        // sync channel for batches produced by partition stream for normal and cdf batches
-        let (tx_normal, mut rx_normal) = mpsc::channel::<RecordBatch>(channel_size());
-        let (tx_cdf, mut rx_cdf) = mpsc::channel::<RecordBatch>(channel_size());
-
-        let normal_writer_handle = tokio::task::spawn(async move {
-            let mut writer = DeltaWriter::new(object_store, normal_config);
-            let mut total_write_ms: u64 = 0;
-            while let Some(batch) = rx_normal.recv().await {
-                let wstart = std::time::Instant::now();
-                writer.write(&batch).await?;
-                total_write_ms += wstart.elapsed().as_millis() as u64;
-            }
-            let adds = writer.close().await?;
-            Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
-        });
-
-        let cdf_writer_handle = tokio::task::spawn(async move {
-            let mut writer = DeltaWriter::new(cdf_store, cdf_config);
-            let mut total_write_ms: u64 = 0;
-            while let Some(batch) = rx_cdf.recv().await {
-                let wstart = std::time::Instant::now();
-                writer.write(&batch).await?;
-                total_write_ms += wstart.elapsed().as_millis() as u64;
-            }
-            let adds = writer.close().await?;
-            Ok::<(Vec<Add>, u64), DeltaTableError>((adds, total_write_ms))
-        });
-
-        // spawn partition workers that split batches and send to appropriate writer channel
-        let mut worker_handles = Vec::with_capacity(partition_streams.len());
-        let scan_start = std::time::Instant::now();
-        for mut partition_stream in partition_streams {
-            let txn = tx_normal.clone();
-            let txc = tx_cdf.clone();
-            let session_ctx = SessionContext::new();
-            let cdf_schema_clone = cdf_schema.clone();
-
-            let h = tokio::task::spawn(async move {
-                while let Some(maybe_batch) = partition_stream.next().await {
-                    let batch = maybe_batch?;
-
-                    // split batch since upstream unioned write and cdf plans
-                    let table_provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(
-                        batch.schema(),
-                        vec![vec![batch.clone()]],
-                    )?);
-                    let batch_df = session_ctx.read_table(table_provider).unwrap();
-
-                    let normal_df = batch_df.clone().filter(col(CDC_COLUMN_NAME).in_list(
-                        vec![lit("delete"), lit("source_delete"), lit("update_preimage")],
-                        true,
-                    ))?;
-
-                    let cdf_df = batch_df.filter(col(CDC_COLUMN_NAME).in_list(
-                        vec![
-                            lit("delete"),
-                            lit("insert"),
-                            lit("update_preimage"),
-                            lit("update_postimage"),
-                        ],
-                        false,
-                    ))?;
-
-                    // Concatenate with the CDF_schema, since we need to keep the _change_type col
-                    let mut normal_batch =
-                        concat_batches(&cdf_schema_clone, &normal_df.collect().await?)?;
-
+                // Stream normal batches and send to writer
+                let mut normal_stream = normal_df.execute_stream().await?;
+                while let Some(mut normal_batch) = normal_stream.try_next().await? {
                     // Drop the CDC_COLUMN ("_change_type")
                     let mut idx: Option<usize> = None;
                     for (i_field, field) in normal_batch.schema_ref().fields().iter().enumerate() {
@@ -584,70 +672,72 @@ pub(crate) async fn write_execution_plan_v3(
                         "idx of _change_type col not found. This shouldn't have happened.",
                     ))?);
 
-                    let cdf_batch = concat_batches(&cdf_schema_clone, &cdf_df.collect().await?)?;
-
-                    // send to writers channels
                     txn.send(normal_batch).await.map_err(|_| {
                         DeltaTableError::Generic("normal writer closed unexpectedly".to_string())
                     })?;
+                }
+
+                // Stream CDF batches and send to writer
+                let mut cdf_stream = cdf_df.execute_stream().await?;
+                while let Some(cdf_batch) = cdf_stream.try_next().await? {
                     txc.send(cdf_batch).await.map_err(|_| {
                         DeltaTableError::Generic("cdf writer closed unexpectedly".to_string())
                     })?;
                 }
-                Ok::<(), DeltaTableError>(())
-            });
+            }
+            Ok::<(), DeltaTableError>(())
+        });
 
-            worker_handles.push(h);
-        }
-
-        // drop original senders so writer tasks exit after all workers finish
-        drop(tx_normal);
-        drop(tx_cdf);
-
-        // wait for writer tasks to finish
-        let normal_join = normal_writer_handle
-            .await
-            .map_err(|e| DeltaTableError::Generic(format!("normal writer join error: {}", e)))?;
-        let (normal_adds, normal_write_ms) = normal_join?;
-
-        let cdf_join = cdf_writer_handle
-            .await
-            .map_err(|e| DeltaTableError::Generic(format!("cdf writer join error: {}", e)))?;
-        let (cdf_adds, cdf_write_ms) = cdf_join?;
-
-        // check if workers that collect stream didnt fail
-        for h in worker_handles {
-            let join_res = h.await.map_err(|e| {
-                DeltaTableError::Generic(format!("worker join error when driving partition: {}", e))
-            })?;
-            join_res?;
-        }
-
-        let mut actions = normal_adds.into_iter().map(Action::Add).collect::<Vec<_>>();
-        let mut cdf_actions = cdf_adds
-            .into_iter()
-            .map(|add| {
-                Action::Cdc(AddCDCFile {
-                    path: format!("_change_data/{}", add.path),
-                    size: add.size,
-                    partition_values: add.partition_values,
-                    data_change: false,
-                    tags: add.tags,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        actions.append(&mut cdf_actions);
-
-        let write_time_ms = normal_write_ms + cdf_write_ms;
-        let scan_elapsed = scan_start.elapsed().as_millis() as u64;
-        let scan_time_ms = scan_elapsed.saturating_sub(write_time_ms);
-
-        let metrics = WriteExecutionPlanMetrics {
-            scan_time_ms,
-            write_time_ms,
-        };
-
-        Ok((actions, metrics))
+        worker_handles.push(h);
     }
+
+    // drop original senders so writer tasks exit after all workers finish
+    drop(tx_normal);
+    drop(tx_cdf);
+
+    // wait for writer tasks to finish
+    let normal_join = normal_writer_handle
+        .await
+        .map_err(|e| DeltaTableError::Generic(format!("normal writer join error: {}", e)))?;
+    let (normal_adds, normal_write_ms) = normal_join?;
+
+    let cdf_join = cdf_writer_handle
+        .await
+        .map_err(|e| DeltaTableError::Generic(format!("cdf writer join error: {}", e)))?;
+    let (cdf_adds, cdf_write_ms) = cdf_join?;
+
+    // check if workers that collect stream didnt fail
+    for h in worker_handles {
+        let join_res = h.await.map_err(|e| {
+            DeltaTableError::Generic(format!("worker join error when driving partition: {}", e))
+        })?;
+        join_res?;
+    }
+
+    let mut actions = normal_adds.into_iter().map(Action::Add).collect::<Vec<_>>();
+    let mut cdf_actions = cdf_adds
+        .into_iter()
+        .map(|add| {
+            Action::Cdc(AddCDCFile {
+                path: format!("_change_data/{}", add.path),
+                size: add.size,
+                partition_values: add.partition_values,
+                data_change: false,
+                tags: add.tags,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    actions.append(&mut cdf_actions);
+
+    let write_time_ms = normal_write_ms + cdf_write_ms;
+    let scan_elapsed = scan_start.elapsed().as_millis() as u64;
+    let scan_time_ms = scan_elapsed.saturating_sub(write_time_ms);
+
+    let metrics = WriteExecutionPlanMetrics {
+        scan_time_ms,
+        write_time_ms,
+    };
+
+    Ok((actions, metrics))
 }
