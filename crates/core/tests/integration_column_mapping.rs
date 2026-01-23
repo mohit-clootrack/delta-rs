@@ -1189,6 +1189,145 @@ async fn test_merge_with_special_column_names_and_column_mapping() -> TestResult
     Ok(())
 }
 
+/// Test that verifies column ordering is maintained correctly after merge with column mapping
+/// This test uses distinct values for each column to detect if values get written to wrong columns
+#[tokio::test]
+async fn test_merge_column_ordering_with_column_mapping() -> TestResult {
+    use deltalake_core::operations::create::CreateBuilder;
+    use deltalake_core::kernel::{DataType, StructField};
+    use arrow::array::{Int32Array, StringArray as ArrowStringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use datafusion::prelude::{col, SessionContext};
+
+    let tmp_dir = tempfile::tempdir()?;
+    let table_path = tmp_dir.path().to_str().unwrap();
+
+    // Create a table with 4 columns to better detect ordering issues
+    // Use distinct value patterns for each column
+    let table = CreateBuilder::new()
+        .with_location(table_path)
+        .with_columns(vec![
+            StructField::new("key", DataType::STRING, false),
+            StructField::new("col_a", DataType::INTEGER, true),
+            StructField::new("col_b", DataType::INTEGER, true),
+            StructField::new("col_c", DataType::INTEGER, true),
+        ])
+        .with_configuration(vec![
+            ("delta.columnMapping.mode".to_string(), Some("name".to_string())),
+        ])
+        .await?;
+
+    // Write initial data with distinct patterns:
+    // key "X": col_a=100, col_b=200, col_c=300
+    // key "Y": col_a=110, col_b=210, col_c=310
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("key", ArrowDataType::Utf8, false),
+        ArrowField::new("col_a", ArrowDataType::Int32, true),
+        ArrowField::new("col_b", ArrowDataType::Int32, true),
+        ArrowField::new("col_c", ArrowDataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["X", "Y"])),
+            Arc::new(Int32Array::from(vec![100, 110])),
+            Arc::new(Int32Array::from(vec![200, 210])),
+            Arc::new(Int32Array::from(vec![300, 310])),
+        ],
+    )?;
+
+    let table = deltalake_core::operations::write::WriteBuilder::new(
+        table.log_store(),
+        table.snapshot().ok().map(|s| s.snapshot()).cloned(),
+    )
+    .with_input_batches(vec![batch])
+    .with_save_mode(SaveMode::Append)
+    .await?;
+
+    // Create source data for MERGE with different value patterns:
+    // key "X": update col_a=101, col_b=201, col_c=301
+    // key "Z": insert col_a=120, col_b=220, col_c=320
+    let source_schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("key", ArrowDataType::Utf8, false),
+        ArrowField::new("col_a", ArrowDataType::Int32, true),
+        ArrowField::new("col_b", ArrowDataType::Int32, true),
+        ArrowField::new("col_c", ArrowDataType::Int32, true),
+    ]));
+
+    let source_batch = RecordBatch::try_new(
+        source_schema,
+        vec![
+            Arc::new(ArrowStringArray::from(vec!["X", "Z"])),
+            Arc::new(Int32Array::from(vec![101, 120])),
+            Arc::new(Int32Array::from(vec![201, 220])),
+            Arc::new(Int32Array::from(vec![301, 320])),
+        ],
+    )?;
+
+    let merge_ctx = SessionContext::new();
+    let source_df = merge_ctx.read_batch(source_batch)?;
+
+    // Perform MERGE with all columns
+    let (table, _metrics) = table
+        .merge(source_df, col("target.key").eq(col("source.key")))
+        .with_source_alias("source")
+        .with_target_alias("target")
+        .when_matched_update(|update| {
+            update
+                .update("col_a", col("source.col_a"))
+                .update("col_b", col("source.col_b"))
+                .update("col_c", col("source.col_c"))
+        })?
+        .when_not_matched_insert(|insert| {
+            insert
+                .set("key", col("source.key"))
+                .set("col_a", col("source.col_a"))
+                .set("col_b", col("source.col_b"))
+                .set("col_c", col("source.col_c"))
+        })?
+        .await?;
+
+    // Read back and verify each column has its expected values
+    let ctx2 = create_session().into_inner();
+    let provider2 = table.table_provider().await?;
+    ctx2.register_table("result", provider2)?;
+
+    let df2 = ctx2.sql("SELECT key, col_a, col_b, col_c FROM result ORDER BY key").await?;
+    let result_batches = df2.collect().await?;
+
+    // Expected:
+    // X: 101, 201, 301 (updated from source)
+    // Y: 110, 210, 310 (unchanged from target)
+    // Z: 120, 220, 320 (inserted from source)
+    let expected = vec![
+        "+-----+-------+-------+-------+",
+        "| key | col_a | col_b | col_c |",
+        "+-----+-------+-------+-------+",
+        "| X   | 101   | 201   | 301   |",
+        "| Y   | 110   | 210   | 310   |",
+        "| Z   | 120   | 220   | 320   |",
+        "+-----+-------+-------+-------+",
+    ];
+    assert_batches_sorted_eq!(expected, &result_batches);
+
+    // Additional verification: ensure values aren't swapped between columns
+    // For row X: col_a should be 101 (not 201 or 301)
+    // For row Z: col_b should be 220 (not 120 or 320)
+    let check_df = ctx2.sql("SELECT col_a, col_b, col_c FROM result WHERE key = 'X'").await?;
+    let check_batches = check_df.collect().await?;
+    let check_expected = vec![
+        "+-------+-------+-------+",
+        "| col_a | col_b | col_c |",
+        "+-------+-------+-------+",
+        "| 101   | 201   | 301   |",
+        "+-------+-------+-------+",
+    ];
+    assert_batches_sorted_eq!(check_expected, &check_batches);
+
+    Ok(())
+}
+
 /// Test that MERGE with column mapping writes correct data that can be read back
 /// This test verifies the data values are correct after merge, not just that the operation succeeds
 #[tokio::test]
