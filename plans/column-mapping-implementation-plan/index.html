@@ -8,28 +8,24 @@
       
       
       
-        <link rel="canonical" href="https://github.com/delta-io/delta-rs/integrations/object-storage/gcs/">
+        <link rel="canonical" href="https://github.com/delta-io/delta-rs/plans/column-mapping-implementation-plan/">
       
       
-        <link rel="prev" href="../adls/">
       
       
-        <link rel="next" href="../hdfs/">
-      
-      
-      <link rel="icon" href="../../../delta-rust-no-whitespace.svg">
+      <link rel="icon" href="../../delta-rust-no-whitespace.svg">
       <meta name="generator" content="mkdocs-1.5.3, mkdocs-material-9.4.5">
     
     
       
-        <title>GCS Storage Backend - Delta Lake Documentation</title>
+        <title>Column Mapping Mode Support for delta-rs - Delta Lake Documentation</title>
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.6a10b989.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.6a10b989.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.356b1318.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.356b1318.min.css">
       
       
 
@@ -48,11 +44,11 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/_markdown_exec_ansi.css">
+      <link rel="stylesheet" href="../../assets/_markdown_exec_ansi.css">
     
-      <link rel="stylesheet" href="../../../assets/_mkdocstrings.css">
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
     
-    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce((e,_)=>(e<<5)-e+_.charCodeAt(0),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce((e,_)=>(e<<5)-e+_.charCodeAt(0),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
 
@@ -81,7 +77,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#gcs-storage-backend" class="md-skip">
+        <a href="#column-mapping-mode-support-for-delta-rs" class="md-skip">
           Skip to content
         </a>
       
@@ -97,9 +93,9 @@
 
 <header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="../../.." title="Delta Lake Documentation" class="md-header__button md-logo" aria-label="Delta Lake Documentation" data-md-component="logo">
+    <a href="../.." title="Delta Lake Documentation" class="md-header__button md-logo" aria-label="Delta Lake Documentation" data-md-component="logo">
       
-  <img src="../../../delta-rust-no-whitespace.svg" alt="logo">
+  <img src="../../delta-rust-no-whitespace.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -116,7 +112,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              GCS Storage Backend
+              Column Mapping Mode Support for delta-rs
             
           </span>
         </div>
@@ -226,7 +222,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../.." class="md-tabs__link">
+        <a href="../.." class="md-tabs__link">
           
   
     
@@ -246,7 +242,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../../usage/installation/" class="md-tabs__link">
+        <a href="../../usage/installation/" class="md-tabs__link">
           
   
     
@@ -266,7 +262,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../../api/delta_writer/" class="md-tabs__link">
+        <a href="../../api/delta_writer/" class="md-tabs__link">
           
   
     
@@ -282,21 +278,17 @@
         
   
   
-    
-  
   
     
     
       
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../adls/" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../integrations/object-storage/adls/" class="md-tabs__link">
           
   
     
@@ -319,7 +311,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../../how-delta-lake-works/architecture-of-delta-table/" class="md-tabs__link">
+        <a href="../../how-delta-lake-works/architecture-of-delta-table/" class="md-tabs__link">
           
   
     
@@ -339,7 +331,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../../upgrade-guides/guide-1.0.0/" class="md-tabs__link">
+        <a href="../../upgrade-guides/guide-1.0.0/" class="md-tabs__link">
           
   
     
@@ -380,9 +372,9 @@
 
 <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href="../../.." title="Delta Lake Documentation" class="md-nav__button md-logo" aria-label="Delta Lake Documentation" data-md-component="logo">
+    <a href="../.." title="Delta Lake Documentation" class="md-nav__button md-logo" aria-label="Delta Lake Documentation" data-md-component="logo">
       
-  <img src="../../../delta-rust-no-whitespace.svg" alt="logo">
+  <img src="../../delta-rust-no-whitespace.svg" alt="logo">
 
     </a>
     Delta Lake Documentation
@@ -439,7 +431,7 @@
           
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../.." class="md-nav__link ">
+            <a href="../.." class="md-nav__link ">
               
   
   <span class="md-ellipsis">
@@ -471,7 +463,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../why-use-delta-lake/" class="md-nav__link">
+      <a href="../../why-use-delta-lake/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -491,7 +483,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../delta-lake-big-data-small-data/" class="md-nav__link">
+      <a href="../../delta-lake-big-data-small-data/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -511,7 +503,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../delta-lake-best-practices/" class="md-nav__link">
+      <a href="../../delta-lake-best-practices/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -609,7 +601,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/installation/" class="md-nav__link">
+      <a href="../../usage/installation/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -629,7 +621,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/overview/" class="md-nav__link">
+      <a href="../../usage/overview/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -649,7 +641,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/create-delta-lake-table/" class="md-nav__link">
+      <a href="../../usage/create-delta-lake-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -669,7 +661,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/loading-table/" class="md-nav__link">
+      <a href="../../usage/loading-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -689,7 +681,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/appending-overwriting-delta-lake-table/" class="md-nav__link">
+      <a href="../../usage/appending-overwriting-delta-lake-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -709,7 +701,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/constraints/" class="md-nav__link">
+      <a href="../../usage/constraints/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -729,7 +721,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/read-cdf/" class="md-nav__link">
+      <a href="../../usage/read-cdf/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -749,7 +741,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/examining-table/" class="md-nav__link">
+      <a href="../../usage/examining-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -769,7 +761,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/querying-delta-tables/" class="md-nav__link">
+      <a href="../../usage/querying-delta-tables/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -789,7 +781,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/merging-tables/" class="md-nav__link">
+      <a href="../../usage/merging-tables/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -809,7 +801,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/managing-tables/" class="md-nav__link">
+      <a href="../../usage/managing-tables/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -853,7 +845,7 @@
           
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../../usage/writing/" class="md-nav__link ">
+            <a href="../../usage/writing/" class="md-nav__link ">
               
   
   <span class="md-ellipsis">
@@ -885,7 +877,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/writing/writing-to-s3-with-locking-provider/" class="md-nav__link">
+      <a href="../../usage/writing/writing-to-s3-with-locking-provider/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -913,7 +905,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/deleting-rows-from-delta-lake-table/" class="md-nav__link">
+      <a href="../../usage/deleting-rows-from-delta-lake-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -977,7 +969,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/optimize/small-file-compaction-with-optimize/" class="md-nav__link">
+      <a href="../../usage/optimize/small-file-compaction-with-optimize/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -997,7 +989,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../usage/optimize/delta-lake-z-order/" class="md-nav__link">
+      <a href="../../usage/optimize/delta-lake-z-order/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1089,7 +1081,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/delta_writer/" class="md-nav__link">
+      <a href="../../api/delta_writer/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1139,7 +1131,7 @@
           
           
           <div class="md-nav__link md-nav__container">
-            <a href="../../../api/delta_table/" class="md-nav__link ">
+            <a href="../../api/delta_table/" class="md-nav__link ">
               
   
   <span class="md-ellipsis">
@@ -1171,7 +1163,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/delta_table/metadata/" class="md-nav__link">
+      <a href="../../api/delta_table/metadata/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1191,7 +1183,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/delta_table/delta_table_merger/" class="md-nav__link">
+      <a href="../../api/delta_table/delta_table_merger/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1211,7 +1203,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/delta_table/delta_table_optimizer/" class="md-nav__link">
+      <a href="../../api/delta_table/delta_table_optimizer/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1231,7 +1223,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/delta_table/delta_table_alterer/" class="md-nav__link">
+      <a href="../../api/delta_table/delta_table_alterer/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1259,7 +1251,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/schema/" class="md-nav__link">
+      <a href="../../api/schema/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1279,7 +1271,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/storage/" class="md-nav__link">
+      <a href="../../api/storage/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1299,7 +1291,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/query/" class="md-nav__link">
+      <a href="../../api/query/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1319,7 +1311,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/transaction/" class="md-nav__link">
+      <a href="../../api/transaction/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1339,7 +1331,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../api/exceptions/" class="md-nav__link">
+      <a href="../../api/exceptions/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1364,8 +1356,6 @@
       
   
   
-    
-  
   
     
     
@@ -1393,12 +1383,14 @@
       
       
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
       
         
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
         
           
           <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
@@ -1412,7 +1404,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_4">
             <span class="md-nav__icon md-icon"></span>
             Integrations
@@ -1423,8 +1415,6 @@
                 
   
   
-    
-  
   
     
     
@@ -1447,12 +1437,14 @@
     
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_1" checked>
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4_1" >
         
           
           <label class="md-nav__link" for="__nav_4_1" id="__nav_4_1_label" tabindex="0">
@@ -1466,7 +1458,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_1_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_1_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_4_1">
             <span class="md-nav__icon md-icon"></span>
             Object Storage
@@ -1479,7 +1471,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../adls/" class="md-nav__link">
+      <a href="../../integrations/object-storage/adls/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1497,29 +1489,9 @@
                 
   
   
-    
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  <span class="md-ellipsis">
-    GCS Storage Backend
-  </span>
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../integrations/object-storage/gcs/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1528,81 +1500,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#using-rust-with-gcs" class="md-nav__link">
-    Using Rust with GCS
-  </a>
-  
-    <nav class="md-nav" aria-label="Using Rust with GCS">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#before-manual-registration-deprecated" class="md-nav__link">
-    Before (manual registration - deprecated)
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#after-automatic-registration" class="md-nav__link">
-    After (automatic registration)
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#using-application-default-credentials" class="md-nav__link">
-    Using Application Default Credentials
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#example-write-delta-tables-to-gcs-with-polars" class="md-nav__link">
-    Example: Write Delta tables to GCS with Polars
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#passing-gcs-credentials-explicitly" class="md-nav__link">
-    Passing GCS Credentials explicitly
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#delta-lake-on-gcs-required-permissions" class="md-nav__link">
-    Delta Lake on GCS: Required permissions
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1614,7 +1511,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../hdfs/" class="md-nav__link">
+      <a href="../../integrations/object-storage/hdfs/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1634,7 +1531,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../s3/" class="md-nav__link">
+      <a href="../../integrations/object-storage/s3/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1654,7 +1551,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../s3-like/" class="md-nav__link">
+      <a href="../../integrations/object-storage/s3-like/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1674,7 +1571,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../lakefs/" class="md-nav__link">
+      <a href="../../integrations/object-storage/lakefs/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1694,7 +1591,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../special_configuration/" class="md-nav__link">
+      <a href="../../integrations/object-storage/special_configuration/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1722,7 +1619,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-arrow/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-arrow/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1742,7 +1639,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-daft/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-daft/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1762,7 +1659,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-dagster/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-dagster/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1782,7 +1679,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-dask/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-dask/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1802,7 +1699,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-datafusion/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-datafusion/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1822,7 +1719,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-pandas/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-pandas/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1842,7 +1739,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../delta-lake-polars/" class="md-nav__link">
+      <a href="../../integrations/delta-lake-polars/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1918,7 +1815,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../how-delta-lake-works/architecture-of-delta-table/" class="md-nav__link">
+      <a href="../../how-delta-lake-works/architecture-of-delta-table/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1938,7 +1835,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../how-delta-lake-works/delta-lake-acid-transactions/" class="md-nav__link">
+      <a href="../../how-delta-lake-works/delta-lake-acid-transactions/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -1958,7 +1855,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../how-delta-lake-works/delta-lake-file-skipping/" class="md-nav__link">
+      <a href="../../how-delta-lake-works/delta-lake-file-skipping/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -2030,7 +1927,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../../upgrade-guides/guide-1.0.0/" class="md-nav__link">
+      <a href="../../upgrade-guides/guide-1.0.0/" class="md-nav__link">
         
   
   <span class="md-ellipsis">
@@ -2078,23 +1975,78 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#using-rust-with-gcs" class="md-nav__link">
-    Using Rust with GCS
+  <a href="#overview" class="md-nav__link">
+    Overview
   </a>
   
-    <nav class="md-nav" aria-label="Using Rust with GCS">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#status-read-support-complete" class="md-nav__link">
+    Status: Read Support Complete ✅
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#background" class="md-nav__link">
+    Background
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-summary" class="md-nav__link">
+    Implementation Summary
+  </a>
+  
+    <nav class="md-nav" aria-label="Implementation Summary">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#before-manual-registration-deprecated" class="md-nav__link">
-    Before (manual registration - deprecated)
+  <a href="#completed" class="md-nav__link">
+    Completed ✅
+  </a>
+  
+    <nav class="md-nav" aria-label="Completed ✅">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#phase-0-setup" class="md-nav__link">
+    Phase 0: Setup
   </a>
   
 </li>
         
           <li class="md-nav__item">
-  <a href="#after-automatic-registration" class="md-nav__link">
-    After (automatic registration)
+  <a href="#read-support-already-implemented-in-upstream" class="md-nav__link">
+    Read Support (Already Implemented in Upstream)
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    Testing
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#python-bindings" class="md-nav__link">
+    Python Bindings
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#future-work-write-support" class="md-nav__link">
+    Future Work (Write Support)
   </a>
   
 </li>
@@ -2105,29 +2057,56 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#using-application-default-credentials" class="md-nav__link">
-    Using Application Default Credentials
+  <a href="#key-files" class="md-nav__link">
+    Key Files
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#example-write-delta-tables-to-gcs-with-polars" class="md-nav__link">
-    Example: Write Delta tables to GCS with Polars
+  <a href="#test-data" class="md-nav__link">
+    Test Data
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#passing-gcs-credentials-explicitly" class="md-nav__link">
-    Passing GCS Credentials explicitly
+  <a href="#verification" class="md-nav__link">
+    Verification
   </a>
+  
+    <nav class="md-nav" aria-label="Verification">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rust" class="md-nav__link">
+    Rust
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#python" class="md-nav__link">
+    Python
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#manual-verification" class="md-nav__link">
+    Manual Verification
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#delta-lake-on-gcs-required-permissions" class="md-nav__link">
-    Delta Lake on GCS: Required permissions
+  <a href="#backward-compatibility" class="md-nav__link">
+    Backward Compatibility
   </a>
   
 </li>
@@ -2150,59 +2129,149 @@
   
 
 
-<h1 id="gcs-storage-backend">GCS Storage Backend</h1>
-<p><code>delta-rs</code> offers native support for using Google Cloud Storage (GCS) as an object storage backend.</p>
-<p>You don’t need to install any extra dependencies to read/write Delta tables to GCS with engines that use <code>delta-rs</code>. You do need to configure your GCS access credentials correctly.</p>
-<h2 id="using-rust-with-gcs">Using Rust with GCS</h2>
-<p>When using the Rust <code>deltalake</code> crate with the <code>gcs</code> feature enabled, GCS support is <strong>automatically registered</strong> at program startup. You don't need to manually call any registration functions.</p>
-<h3 id="before-manual-registration-deprecated">Before (manual registration - deprecated)</h3>
-<div class="language-rust highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">// Legacy approach where applications had to register the handler</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">deltalake</span><span class="p">::</span><span class="n">gcp</span><span class="p">::</span><span class="n">register_handlers</span><span class="p">(</span><span class="nb">None</span><span class="p">);</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kd">let</span><span class="w"> </span><span class="n">ops</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DeltaOps</span><span class="p">::</span><span class="n">try_from_uri</span><span class="p">(</span><span class="s">&quot;gs://bucket/table&quot;</span><span class="p">.</span><span class="n">parse</span><span class="p">()</span><span class="o">?</span><span class="p">).</span><span class="k">await</span><span class="o">?</span><span class="p">;</span>
-</span></code></pre></div>
-<h3 id="after-automatic-registration">After (automatic registration)</h3>
-<div class="language-rust highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">// Enable the gcs feature in Cargo.toml:</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1">// deltalake = { version = &quot;0.29&quot;, features = [&quot;gcs&quot;] }</span>
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
-</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">use</span><span class="w"> </span><span class="n">deltalake</span><span class="p">::</span><span class="n">DeltaOps</span><span class="p">;</span>
-</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
-</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="cp">#[tokio::main]</span>
-</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="nb">Box</span><span class="o">&lt;</span><span class="k">dyn</span><span class="w"> </span><span class="n">std</span><span class="p">::</span><span class="n">error</span><span class="p">::</span><span class="n">Error</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">{</span>
-</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="c1">// The gs:// scheme is recognized automatically</span>
-</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">ops</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DeltaOps</span><span class="p">::</span><span class="n">try_from_uri</span><span class="p">(</span><span class="s">&quot;gs://bucket/table&quot;</span><span class="p">.</span><span class="n">parse</span><span class="p">()</span><span class="o">?</span><span class="p">).</span><span class="k">await</span><span class="o">?</span><span class="p">;</span>
-</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="nb">Ok</span><span class="p">(())</span>
-</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="p">}</span>
-</span></code></pre></div>
-<p>The automatic registration happens via constructor hooks in the meta-crate (see the <a href="https://github.com/delta-io/delta-rs/blob/main/CHANGELOG.md">CHANGELOG</a> for details).</p>
-<p><strong>Note</strong>: If you're using <code>deltalake-core</code> and individual storage crates directly (instead of the <code>deltalake</code> meta-crate), you'll still need to call <code>deltalake_gcp::register_handlers(None)</code> manually.</p>
-<h2 id="using-application-default-credentials">Using Application Default Credentials</h2>
-<p>Application Default Credentials (ADC) is a strategy used by GCS to automatically find credentials based on the application environment.</p>
-<p>If you are working from your local machine and have ADC set up then you can read/write Delta tables from GCS directly, without having to pass your credentials explicitly.</p>
-<h2 id="example-write-delta-tables-to-gcs-with-polars">Example: Write Delta tables to GCS with Polars</h2>
-<p>Using Polars, you can write a Delta table to GCS like this:</p>
-<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># create a toy dataframe</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">polars</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pl</span>
-</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">df</span> <span class="o">=</span> <span class="n">pl</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">({</span><span class="s2">&quot;foo&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">]})</span>
-</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
-</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="c1"># define path</span>
-</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">table_path</span> <span class="o">=</span> <span class="s2">&quot;gs://bucket/delta-table&quot;</span>
-</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>
-</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="c1"># write Delta to GCS</span>
-</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="n">df</span><span class="o">.</span><span class="n">write_delta</span><span class="p">(</span><span class="n">table_path</span><span class="p">)</span>
-</span></code></pre></div>
-<h2 id="passing-gcs-credentials-explicitly">Passing GCS Credentials explicitly</h2>
-<p>Alternatively, you can pass GCS credentials to your query engine explicitly.</p>
-<p>For Polars, you would do this using the <code>storage_options</code> keyword. This will forward your credentials to the <code>object store</code> library that Polars uses under the hood. Read the <a href="https://docs.pola.rs/api/python/stable/reference/api/polars.DataFrame.write_delta.html">Polars documentation</a> and the <a href="https://docs.rs/object_store/latest/object_store/gcp/enum.GoogleConfigKey.html#variants"><code>object store</code> documentation</a> for more information.</p>
-<h2 id="delta-lake-on-gcs-required-permissions">Delta Lake on GCS: Required permissions</h2>
-<p>You will need the following permissions in your GCS account:</p>
+<h1 id="column-mapping-mode-support-for-delta-rs">Column Mapping Mode Support for delta-rs</h1>
+<h2 id="overview">Overview</h2>
+<p>Enable support for Delta Lake column mapping mode (<code>name</code> and <code>id</code>) in delta-rs, allowing reading tables where logical column names differ from physical Parquet column names.</p>
+<h2 id="status-read-support-complete">Status: Read Support Complete ✅</h2>
+<p>Column mapping read support is now fully functional through the delta_kernel integration.</p>
+<h2 id="background">Background</h2>
+<p><strong>Column Mapping Mode</strong> decouples logical column names (user-visible) from physical column names (in Parquet files):
+- <strong><code>name</code> mode</strong>: Uses <code>delta.columnMapping.physicalName</code> field metadata
+- <strong><code>id</code> mode</strong>: Uses Parquet <code>field_id</code> via <code>delta.columnMapping.id</code> field metadata</p>
+<h2 id="implementation-summary">Implementation Summary</h2>
+<h3 id="completed">Completed ✅</h3>
+<h4 id="phase-0-setup">Phase 0: Setup</h4>
 <ul>
-<li><code>storage.objects.create</code></li>
-<li><code>storage.objects.delete</code> (only required for uploads that overwrite an existing object)</li>
-<li><code>storage.objects.get</code> (only required if you plan on using the Google Cloud CLI)</li>
-<li><code>storage.objects.list</code> (only required if you plan on using the Google Cloud CLI)</li>
+<li>[x] Add upstream remote and fetch latest changes</li>
+<li>[x] Merge upstream main (delta_kernel 0.19.0) into working branch</li>
+<li>[x] Verify build works</li>
 </ul>
-<p>For more information, see the <a href="https://cloud.google.com/storage/docs/uploading-objects">GCP documentation</a></p>
+<h4 id="read-support-already-implemented-in-upstream">Read Support (Already Implemented in Upstream)</h4>
+<p>The "next" scan implementation in <code>delta_datafusion/table_provider/next/</code> already handles column mapping correctly:</p>
+<ul>
+<li>[x] <code>parse_partitions()</code> in <code>scan_row.rs</code> uses <code>field.physical_name(column_mapping_mode)</code> to map partition values</li>
+<li>[x] <code>rewrite_expression()</code> in <code>scan/plan.rs</code> transforms predicates from logical to physical names</li>
+<li>[x] <code>DeltaScanExec</code> handles statistics with physical column names</li>
+<li>[x] Schema transformation via <code>schema.make_physical(column_mapping_mode)</code> from delta_kernel</li>
+</ul>
+<h4 id="testing">Testing</h4>
+<ul>
+<li>[x] Rust integration tests (<code>crates/core/tests/integration_column_mapping.rs</code>)</li>
+<li>test_read_table_with_column_mapping</li>
+<li>test_datafusion_query_with_column_mapping</li>
+<li>test_partition_filter_with_column_mapping</li>
+<li>test_statistics_with_column_mapping</li>
+<li>test_projection_with_column_mapping</li>
+<li>test_physical_name_access</li>
+<li>
+<p>test_full_table_scan_with_column_mapping</p>
+</li>
+<li>
+<p>[x] Python tests (<code>python/tests/test_column_mapping.py</code>)</p>
+</li>
+<li>test_load_table_with_column_mapping</li>
+<li>test_schema_has_logical_names</li>
+<li>test_read_to_pyarrow</li>
+<li>test_read_to_pandas</li>
+<li>test_filter_on_partition_column</li>
+<li>test_metadata</li>
+<li>test_datafusion_select_all</li>
+<li>test_datafusion_select_with_quotes</li>
+</ul>
+<h4 id="python-bindings">Python Bindings</h4>
+<ul>
+<li>[x] Enable reader version 2 (required for column mapping)</li>
+<li>[x] Add <code>columnMapping</code> to supported reader features</li>
+<li>[x] Remove explicit block on column mapping in <code>to_pyarrow_dataset()</code></li>
+</ul>
+<h3 id="future-work-write-support">Future Work (Write Support)</h3>
+<blockquote>
+<p><strong>Note:</strong> Write support requires additional changes and is not yet implemented.
+The <code>ColumnMapping</code> feature is currently commented out in <code>protocol.rs</code> ProtocolChecker.</p>
+</blockquote>
+<ul>
+<li>[ ] Enable <code>TableFeature::ColumnMapping</code> in <code>kernel/transaction/protocol.rs</code></li>
+<li>[ ] Update <code>WriterConfig</code> to accept column mapping mode</li>
+<li>[ ] Transform Arrow schema fields to physical names before writing Parquet</li>
+<li>[ ] Transform partition values to physical names in <code>Add</code> actions</li>
+<li>[ ] Verify statistics are correct</li>
+</ul>
+<hr />
+<h2 id="key-files">Key Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>crates/core/src/kernel/snapshot/iterators/scan_row.rs</code></td>
+<td>Partition value parsing with physical names</td>
+</tr>
+<tr>
+<td><code>crates/core/src/delta_datafusion/table_provider/next/scan/plan.rs</code></td>
+<td>Predicate rewriting for physical names</td>
+</tr>
+<tr>
+<td><code>crates/core/src/delta_datafusion/table_provider/next/scan/exec.rs</code></td>
+<td>Statistics handling with column mapping</td>
+</tr>
+<tr>
+<td><code>crates/core/src/kernel/arrow/engine_ext.rs</code></td>
+<td><code>make_physical()</code> and stats schema utilities</td>
+</tr>
+<tr>
+<td><code>python/deltalake/table.py</code></td>
+<td>Python protocol feature support</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="test-data">Test Data</h2>
+<p>Existing test table: <code>crates/test/tests/data/table_with_column_mapping/</code></p>
+<p>Schema with column mapping metadata:
+<div class="language-json highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Company Very Short&quot;</span><span class="p">,</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="nt">&quot;delta.columnMapping.id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="nt">&quot;delta.columnMapping.physicalName&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;col-173b4db9-b5ad-427f-9e75-516aae37fbbb&quot;</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="p">}</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">}</span>
+</span></code></pre></div></p>
+<p>Partition values in transaction log use physical names:
+<div class="language-json highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">&quot;partitionValues&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;col-173b4db9-b5ad-427f-9e75-516aae37fbbb&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BMS&quot;</span><span class="p">}}</span>
+</span></code></pre></div></p>
+<hr />
+<h2 id="verification">Verification</h2>
+<h3 id="rust">Rust</h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>-p<span class="w"> </span>deltalake-core<span class="w"> </span>--test<span class="w"> </span>integration_column_mapping<span class="w"> </span>--features<span class="w"> </span>datafusion
+</span></code></pre></div>
+<h3 id="python">Python</h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nb">cd</span><span class="w"> </span>python
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>pytest<span class="w"> </span>tests/test_column_mapping.py<span class="w"> </span>-v
+</span></code></pre></div>
+<h3 id="manual-verification">Manual Verification</h3>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">deltalake</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">dt</span> <span class="o">=</span> <span class="n">deltalake</span><span class="o">.</span><span class="n">DeltaTable</span><span class="p">(</span><span class="s2">&quot;crates/test/tests/data/table_with_column_mapping&quot;</span><span class="p">)</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">dt</span><span class="o">.</span><span class="n">schema</span><span class="p">())</span>  <span class="c1"># Shows logical column names with metadata</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">dt</span><span class="o">.</span><span class="n">to_pandas</span><span class="p">())</span>  <span class="c1"># Data with logical column names</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="kn">from</span><span class="w"> </span><span class="nn">datafusion</span><span class="w"> </span><span class="kn">import</span> <span class="n">SessionContext</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="n">ctx</span> <span class="o">=</span> <span class="n">SessionContext</span><span class="p">()</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="n">ctx</span><span class="o">.</span><span class="n">register_table</span><span class="p">(</span><span class="s2">&quot;test&quot;</span><span class="p">,</span> <span class="n">dt</span><span class="o">.</span><span class="n">to_pyarrow_dataset</span><span class="p">())</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="n">result</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">sql</span><span class="p">(</span><span class="s1">&#39;SELECT &quot;Company Very Short&quot;, &quot;Super Name&quot; FROM test&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">collect</span><span class="p">()</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+</span></code></pre></div>
+<hr />
+<h2 id="backward-compatibility">Backward Compatibility</h2>
+<ul>
+<li><code>ColumnMappingMode::None</code> preserves existing behavior exactly</li>
+<li>No breaking API changes</li>
+<li>All existing tests continue to pass</li>
+</ul>
 
 
 
@@ -2221,44 +2290,6 @@
       
         <footer class="md-footer">
   
-    
-      
-      <nav class="md-footer__inner md-grid" aria-label="Footer" >
-        
-          
-          <a href="../adls/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Azure ADLS Storage Backend">
-            <div class="md-footer__button md-icon">
-              
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12Z"/></svg>
-            </div>
-            <div class="md-footer__title">
-              <span class="md-footer__direction">
-                Previous
-              </span>
-              <div class="md-ellipsis">
-                Azure ADLS Storage Backend
-              </div>
-            </div>
-          </a>
-        
-        
-          
-          <a href="../hdfs/" class="md-footer__link md-footer__link--next" aria-label="Next: HDFS Storage Backend">
-            <div class="md-footer__title">
-              <span class="md-footer__direction">
-                Next
-              </span>
-              <div class="md-ellipsis">
-                HDFS Storage Backend
-              </div>
-            </div>
-            <div class="md-footer__button md-icon">
-              
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4Z"/></svg>
-            </div>
-          </a>
-        
-      </nav>
     
   
   <div class="md-footer-meta md-typeset">
@@ -2290,10 +2321,10 @@
     </div>
     
     
-    <script id="__config" type="application/json">{"base": "../../..", "features": ["navigation.tracking", "navigation.instant", "navigation.expand", "navigation.tabs", "navigation.indexes", "navigation.tabs.sticky", "navigation.footer", "content.tabs.link", "content.code.annotation", "content.code.copy"], "search": "../../../assets/javascripts/workers/search.f886a092.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
+    <script id="__config" type="application/json">{"base": "../..", "features": ["navigation.tracking", "navigation.instant", "navigation.expand", "navigation.tabs", "navigation.indexes", "navigation.tabs.sticky", "navigation.footer", "content.tabs.link", "content.code.annotation", "content.code.copy"], "search": "../../assets/javascripts/workers/search.f886a092.min.js", "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.aecac24b.min.js"></script>
+      <script src="../../assets/javascripts/bundle.aecac24b.min.js"></script>
       
     
   </body>
