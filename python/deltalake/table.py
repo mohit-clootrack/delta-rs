@@ -111,11 +111,12 @@ class _ColumnMappingDataset:
         Uses string-based replacement since PyArrow Expression objects don't expose
         their internal structure for traversal. The string representation of expressions
         follows a predictable format that we can parse and rebuild.
+
+        Performance: O(n) where n is expression string length. Uses single-pass
+        token-based replacement to avoid multiple regex passes over the string.
         """
         if expr is None:
             return None
-
-        import re
 
         import pyarrow.dataset as ds
 
@@ -130,26 +131,64 @@ class _ColumnMappingDataset:
         if expr_str in logical_to_physical:
             return ds.field(logical_to_physical[expr_str])
 
-        # For compound expressions, use string-based replacement
-        # Expression string format examples:
-        #   (id > 3)
-        #   ((id > 3) and (name == "A"))
-        #   ((col1 >= 10) or (col2 == "test"))
+        # Single-pass replacement: scan through string once, replacing column names
+        # while respecting quoted strings. This is O(n) instead of O(n*k) where k = columns
+        translated_str = self._replace_column_names_single_pass(
+            expr_str, logical_to_physical
+        )
 
-        # Replace logical column names with physical names
-        # We need to be careful not to replace strings inside quotes
-        translated_str = expr_str
-
-        for logical_name, physical_name in logical_to_physical.items():
-            # Use word boundary matching to avoid partial replacements
-            # This pattern matches the column name as a complete word,
-            # but not inside quoted strings
-            pattern = r'(?<!["\'])(?<!\w)' + re.escape(logical_name) + r'(?!\w)(?!["\'])'
-            translated_str = re.sub(pattern, physical_name, translated_str)
-
-        # Rebuild the expression by evaluating the string
-        # We need to parse the expression string and rebuild it
+        # Rebuild the expression by parsing the translated string
         return self._parse_expression_string(translated_str)
+
+    def _replace_column_names_single_pass(
+        self, expr_str: str, logical_to_physical: dict[str, str]
+    ) -> str:
+        """Replace column names in expression string in a single pass.
+
+        Handles quoted strings correctly by tracking quote state.
+        Time complexity: O(n) where n = len(expr_str)
+        """
+        result = []
+        i = 0
+        n = len(expr_str)
+        in_double_quote = False
+        in_single_quote = False
+
+        while i < n:
+            char = expr_str[i]
+
+            # Track quote state
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                result.append(char)
+                i += 1
+            elif char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                result.append(char)
+                i += 1
+            elif in_double_quote or in_single_quote:
+                # Inside quotes - don't replace
+                result.append(char)
+                i += 1
+            elif char.isalnum() or char == "_" or char == "-":
+                # Potential column name - extract the full identifier
+                start = i
+                while i < n and (
+                    expr_str[i].isalnum() or expr_str[i] == "_" or expr_str[i] == "-"
+                ):
+                    i += 1
+                identifier = expr_str[start:i]
+
+                # Check if this identifier should be replaced
+                if identifier in logical_to_physical:
+                    result.append(logical_to_physical[identifier])
+                else:
+                    result.append(identifier)
+            else:
+                result.append(char)
+                i += 1
+
+        return "".join(result)
 
     def _parse_expression_string(self, expr_str: str) -> "pyarrow.dataset.Expression":
         """Parse an expression string and rebuild it as a PyArrow Expression.

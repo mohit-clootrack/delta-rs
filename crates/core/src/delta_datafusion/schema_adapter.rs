@@ -49,28 +49,40 @@ impl SchemaAdapter for DeltaSchemaAdapter {
 
     fn map_schema(&self, file_schema: &Schema) -> Result<(Arc<dyn SchemaMapper>, Vec<usize>)> {
         let mut projection = Vec::with_capacity(file_schema.fields().len());
-        // Build a mapping from physical column names to logical column names
         let mut physical_to_logical: HashMap<String, String> = HashMap::new();
 
+        // Build lookup maps for O(1) access instead of O(m) linear search per field
+        // Maps: physical_name -> (logical_name, field) and logical_name -> field
+        let mut physical_name_lookup: HashMap<&str, (&str, &Arc<Field>)> = HashMap::new();
+        let mut logical_name_lookup: HashMap<&str, &Arc<Field>> = HashMap::new();
+
+        for field in self.projected_table_schema.fields().iter() {
+            if let Some(physical_name) = field.metadata().get(COLUMN_MAPPING_PHYSICAL_NAME_KEY) {
+                physical_name_lookup.insert(physical_name.as_str(), (field.name(), field));
+            }
+            logical_name_lookup.insert(field.name(), field);
+        }
+
+        // Now iterate through file fields with O(1) lookups
         for (file_idx, file_field) in file_schema.fields.iter().enumerate() {
-            // Check if this file field's name matches any projected table field's physical or logical name
             let file_field_name = file_field.name();
-            let matched_field = self.projected_table_schema.fields().iter().find(|table_field| {
-                // Check physical name first (for column mapping tables)
-                if let Some(physical_name) = table_field.metadata().get(COLUMN_MAPPING_PHYSICAL_NAME_KEY) {
-                    if physical_name == file_field_name {
-                        return true;
-                    }
-                }
-                // Fall back to logical name
-                table_field.name() == file_field_name
-            });
-            if let Some(table_field) = matched_field {
+
+            // Check physical name first (for column mapping tables), then logical name
+            let matched_field = physical_name_lookup
+                .get(file_field_name.as_str())
+                .map(|(logical, field)| (*logical, *field))
+                .or_else(|| {
+                    logical_name_lookup
+                        .get(file_field_name.as_str())
+                        .map(|field| (field.name().as_str(), *field))
+                });
+
+            if let Some((logical_name, _field)) = matched_field {
                 projection.push(file_idx);
-                // If the file field name differs from the table field name (due to column mapping),
-                // record the mapping from physical to logical name
-                if file_field_name != table_field.name() {
-                    physical_to_logical.insert(file_field_name.to_string(), table_field.name().to_string());
+                // Record mapping if physical differs from logical
+                if file_field_name != logical_name {
+                    physical_to_logical
+                        .insert(file_field_name.to_string(), logical_name.to_string());
                 }
             }
         }
