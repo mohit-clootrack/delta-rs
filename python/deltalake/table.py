@@ -103,6 +103,265 @@ class _ColumnMappingDataset:
         logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
         return [logical_to_physical.get(col, col) for col in columns]
 
+    def _translate_filter_to_physical(
+        self, expr: "pyarrow.dataset.Expression | None"
+    ) -> "pyarrow.dataset.Expression | None":
+        """Translate logical column names to physical names in filter expression.
+
+        Uses string-based replacement since PyArrow Expression objects don't expose
+        their internal structure for traversal. The string representation of expressions
+        follows a predictable format that we can parse and rebuild.
+
+        Performance: O(n) where n is expression string length. Uses single-pass
+        token-based replacement to avoid multiple regex passes over the string.
+        """
+        if expr is None:
+            return None
+
+        import pyarrow.dataset as ds
+
+        logical_to_physical = {v: k for k, v in self._physical_to_logical.items()}
+
+        # If no columns need translation, return as-is
+        if not logical_to_physical:
+            return expr
+
+        # Check if it's a simple field reference (just a column name)
+        expr_str = str(expr).strip()
+        if expr_str in logical_to_physical:
+            return ds.field(logical_to_physical[expr_str])
+
+        # Single-pass replacement: scan through string once, replacing column names
+        # while respecting quoted strings. This is O(n) instead of O(n*k) where k = columns
+        translated_str = self._replace_column_names_single_pass(
+            expr_str, logical_to_physical
+        )
+
+        # Rebuild the expression by parsing the translated string
+        return self._parse_expression_string(translated_str)
+
+    def _replace_column_names_single_pass(
+        self, expr_str: str, logical_to_physical: dict[str, str]
+    ) -> str:
+        """Replace column names in expression string in a single pass.
+
+        Handles quoted strings correctly by tracking quote state.
+        Time complexity: O(n) where n = len(expr_str)
+        """
+        result = []
+        i = 0
+        n = len(expr_str)
+        in_double_quote = False
+        in_single_quote = False
+
+        while i < n:
+            char = expr_str[i]
+
+            # Track quote state
+            if char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                result.append(char)
+                i += 1
+            elif char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                result.append(char)
+                i += 1
+            elif in_double_quote or in_single_quote:
+                # Inside quotes - don't replace
+                result.append(char)
+                i += 1
+            elif char.isalnum() or char == "_" or char == "-":
+                # Potential column name - extract the full identifier
+                start = i
+                while i < n and (
+                    expr_str[i].isalnum() or expr_str[i] == "_" or expr_str[i] == "-"
+                ):
+                    i += 1
+                identifier = expr_str[start:i]
+
+                # Check if this identifier should be replaced
+                if identifier in logical_to_physical:
+                    result.append(logical_to_physical[identifier])
+                else:
+                    result.append(identifier)
+            else:
+                result.append(char)
+                i += 1
+
+        return "".join(result)
+
+    def _parse_expression_string(self, expr_str: str) -> "pyarrow.dataset.Expression":
+        """Parse an expression string and rebuild it as a PyArrow Expression.
+
+        This is a recursive descent parser for PyArrow expression strings.
+        Supported formats:
+        - Simple field: column_name
+        - Comparison: (column op value) where op is ==, !=, <, <=, >, >=
+        - Logical AND: ((expr1) and (expr2))
+        - Logical OR: ((expr1) or (expr2))
+        - Negation: ~(expr)
+        - is_null: (column is null)
+        - is_valid: (column is not null)
+        - isin: (column is in [...])
+        """
+        import pyarrow.dataset as ds
+
+        expr_str = expr_str.strip()
+
+        # Handle logical AND/OR at the top level
+        # Format: ((expr1) and (expr2)) or ((expr1) or (expr2))
+        if expr_str.startswith("(") and expr_str.endswith(")"):
+            inner = expr_str[1:-1].strip()
+
+            # Find the logical operator by tracking parentheses depth
+            depth = 0
+            i = 0
+            while i < len(inner):
+                if inner[i] == "(":
+                    depth += 1
+                elif inner[i] == ")":
+                    depth -= 1
+                elif depth == 0:
+                    # Check for 'and' or 'or' at this level
+                    if inner[i : i + 5] == " and ":
+                        left = inner[:i].strip()
+                        right = inner[i + 5 :].strip()
+                        return self._parse_expression_string(
+                            left
+                        ) & self._parse_expression_string(right)
+                    elif inner[i : i + 4] == " or ":
+                        left = inner[:i].strip()
+                        right = inner[i + 4 :].strip()
+                        return self._parse_expression_string(
+                            left
+                        ) | self._parse_expression_string(right)
+                i += 1
+
+            # No logical operator found, parse the inner expression
+            # Check for comparison operators
+            for op, method in [
+                (" == ", "__eq__"),
+                (" != ", "__ne__"),
+                (" >= ", "__ge__"),
+                (" <= ", "__le__"),
+                (" > ", "__gt__"),
+                (" < ", "__lt__"),
+            ]:
+                # Find operator outside of quotes
+                idx = self._find_operator_outside_quotes(inner, op)
+                if idx >= 0:
+                    col_name = inner[:idx].strip()
+                    value_str = inner[idx + len(op) :].strip()
+                    field = ds.field(col_name)
+                    value = self._parse_value(value_str)
+                    return getattr(field, method)(value)
+
+            # Check for 'is null' and 'is not null'
+            if " is null" in inner:
+                col_name = inner.replace(" is null", "").strip()
+                return ds.field(col_name).is_null()
+
+            if " is not null" in inner:
+                col_name = inner.replace(" is not null", "").strip()
+                return ds.field(col_name).is_valid()
+
+            # Check for 'is in [...]'
+            if " is in " in inner:
+                parts = inner.split(" is in ", 1)
+                col_name = parts[0].strip()
+                values_str = parts[1].strip()
+                # Parse the list of values
+                if values_str.startswith("[") and values_str.endswith("]"):
+                    values_inner = values_str[1:-1]
+                    values = [
+                        self._parse_value(v.strip())
+                        for v in self._split_list_values(values_inner)
+                    ]
+                    return ds.field(col_name).isin(values)
+
+        # Handle negation: ~(expr)
+        if expr_str.startswith("~"):
+            inner = expr_str[1:].strip()
+            return ~self._parse_expression_string(inner)
+
+        # Simple field reference (just a column name)
+        return ds.field(expr_str)
+
+    def _find_operator_outside_quotes(self, s: str, op: str) -> int:
+        """Find an operator in string s, but not inside quotes."""
+        in_double_quote = False
+        in_single_quote = False
+        i = 0
+        while i < len(s) - len(op) + 1:
+            if s[i] == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif s[i] == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif not in_double_quote and not in_single_quote:
+                if s[i : i + len(op)] == op:
+                    return i
+            i += 1
+        return -1
+
+    def _split_list_values(self, s: str) -> list[str]:
+        """Split a comma-separated list, respecting quotes."""
+        result = []
+        current = ""
+        in_double_quote = False
+        in_single_quote = False
+        for c in s:
+            if c == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current += c
+            elif c == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current += c
+            elif c == "," and not in_double_quote and not in_single_quote:
+                result.append(current.strip())
+                current = ""
+            else:
+                current += c
+        if current.strip():
+            result.append(current.strip())
+        return result
+
+    def _parse_value(self, value_str: str) -> Any:
+        """Parse a value string into the appropriate Python type."""
+        value_str = value_str.strip()
+
+        # String value (double-quoted)
+        if value_str.startswith('"') and value_str.endswith('"'):
+            return value_str[1:-1]
+
+        # String value (single-quoted)
+        if value_str.startswith("'") and value_str.endswith("'"):
+            return value_str[1:-1]
+
+        # Boolean
+        if value_str.lower() == "true":
+            return True
+        if value_str.lower() == "false":
+            return False
+
+        # None/null
+        if value_str.lower() in ("none", "null"):
+            return None
+
+        # Try integer
+        try:
+            return int(value_str)
+        except ValueError:
+            pass
+
+        # Try float
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+
+        # Return as string
+        return value_str
+
     def to_table(
         self,
         columns: list[str] | None = None,
@@ -111,11 +370,12 @@ class _ColumnMappingDataset:
     ) -> "pyarrow.Table":
         """Read the dataset to a PyArrow Table, translating column names."""
         physical_columns = self._translate_columns_to_physical(columns)
+        physical_filter = self._translate_filter_to_physical(filter)
 
-        # Read with physical column names
+        # Read with physical column names and translated filter
         table = self._base_dataset.to_table(
             columns=physical_columns,
-            filter=filter,
+            filter=physical_filter,
             **kwargs,
         )
 
@@ -139,11 +399,12 @@ class _ColumnMappingDataset:
     ) -> Generator["pyarrow.RecordBatch", None, None]:
         """Read the dataset as batches, translating column names."""
         physical_columns = self._translate_columns_to_physical(columns)
+        physical_filter = self._translate_filter_to_physical(filter)
 
-        # Read batches with physical column names and rename
+        # Read batches with physical column names, translated filter, and rename
         for batch in self._base_dataset.to_batches(
             columns=physical_columns,
-            filter=filter,
+            filter=physical_filter,
             **kwargs,
         ):
             # Rename columns in the batch
