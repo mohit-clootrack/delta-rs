@@ -102,18 +102,19 @@ fn transform_schema_to_physical(
     ))
 }
 
-/// Transform a RecordBatch to use physical column names in its schema and add parquet field IDs
-fn transform_batch_to_physical(
+/// Transform a RecordBatch to use physical column names using a pre-computed physical schema.
+/// This is more efficient than recreating the schema for each batch.
+fn transform_batch_to_physical_with_schema(
     batch: &RecordBatch,
-    logical_to_physical: &HashMap<String, String>,
-    logical_to_id: &HashMap<String, i32>,
+    physical_schema: &ArrowSchemaRef,
+    has_column_mapping: bool,
 ) -> DeltaResult<RecordBatch> {
-    if logical_to_physical.is_empty() && logical_to_id.is_empty() {
+    if !has_column_mapping {
         return Ok(batch.clone());
     }
 
-    let physical_schema = transform_schema_to_physical(batch.schema().as_ref(), logical_to_physical, logical_to_id);
-    RecordBatch::try_new(physical_schema, batch.columns().to_vec())
+    // Use pre-computed physical schema instead of recreating it for every batch
+    RecordBatch::try_new(physical_schema.clone(), batch.columns().to_vec())
         .map_err(|e| DeltaTableError::Arrow { source: e })
 }
 
@@ -717,8 +718,9 @@ impl PartitionWriter {
     /// The `close` method has to be invoked to write all data still buffered
     /// and get the list of all written files.
     pub async fn write(&mut self, batch: &RecordBatch) -> DeltaResult<()> {
-        // Transform batch to use physical column names and add parquet field IDs if column mapping is enabled
-        let batch = transform_batch_to_physical(batch, &self.config.logical_to_physical, &self.config.logical_to_id)?;
+        // Transform batch to use physical column names using pre-computed schema (avoids recreating schema per batch)
+        let has_column_mapping = !self.config.logical_to_physical.is_empty() || !self.config.logical_to_id.is_empty();
+        let batch = transform_batch_to_physical_with_schema(batch, &self.config.file_schema, has_column_mapping)?;
 
         if batch.schema() != self.config.file_schema {
             return Err(WriteError::SchemaMismatch {
