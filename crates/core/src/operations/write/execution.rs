@@ -503,9 +503,7 @@ pub(crate) async fn write_exec_plan(
         if mode == ColumnMappingMode::None {
             ColumnMappingConfig::default()
         } else {
-            let schema: StructType = table_config.schema().clone().try_into().map_err(|e| {
-                DeltaTableError::Generic(format!("Failed to convert schema: {}", e))
-            })?;
+            let schema = table_config.schema();
             let (physical_mapping, id_mapping) = schema.get_column_mappings();
             ColumnMappingConfig {
                 mode,
