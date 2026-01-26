@@ -399,11 +399,23 @@ fn get_column_mapping_config(
         if mode == ColumnMappingMode::None {
             ColumnMappingConfig::default()
         } else {
-            let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
-            ColumnMappingConfig {
-                mode,
-                logical_to_physical: physical_mapping,
-                logical_to_id: id_mapping,
+            // When column mapping is enabled and target_schema_with_column_mapping is provided
+            // (schema evolution case), use it for column mappings as it contains both existing
+            // and new column mappings. This is important for merge with schema evolution + column mapping.
+            if let Some(target_schema) = target_schema_with_column_mapping {
+                let (physical_mapping, id_mapping) = target_schema.get_column_mappings();
+                ColumnMappingConfig {
+                    mode,
+                    logical_to_physical: physical_mapping,
+                    logical_to_id: id_mapping,
+                }
+            } else {
+                let (physical_mapping, id_mapping) = snapshot.schema().get_column_mappings();
+                ColumnMappingConfig {
+                    mode,
+                    logical_to_physical: physical_mapping,
+                    logical_to_id: id_mapping,
+                }
             }
         }
     } else if let Some(target_schema) = target_schema_with_column_mapping {
